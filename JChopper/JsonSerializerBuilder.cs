@@ -1,11 +1,9 @@
 ﻿using System;
 using System.Collections;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
-using System.Text;
 using System.Text.Formatting;
 
 namespace JChopper
@@ -19,7 +17,7 @@ namespace JChopper
             {
                 var prmObj = Expression.Parameter(typeof(T), "obj");
                 var prmFormatter = Expression.Parameter(typeof(TFormatter), "formatter");
-                serializer = Expression.Lambda<Action<T, TFormatter>>(CreateSerializer(prmObj, prmFormatter)).Compile();
+                serializer = Expression.Lambda<Action<T, TFormatter>>(CreateSerializer(prmObj, prmFormatter), prmObj, prmFormatter).Compile();
                 this.SetCache(serializer);
             }
             return serializer;
@@ -35,27 +33,58 @@ namespace JChopper
             JsonSerializerCache<T, TFormatter>.Serializer = value;
         }
 
-        private static readonly MethodInfo[] appendMethods = typeof(IFormatterExtensions).GetTypeInfo().DeclaredMethods
-            .Where(x => x.Name == nameof(IFormatterExtensions.Append)).ToArray();
-
-        private static readonly MethodInfo appendStringMethodDefinition = appendMethods.First(x => x.GetParameters()[1].ParameterType == typeof(string));
         private MethodInfo appendStringMethod;
         private Expression AppendStringExpr(ParameterExpression formatter, Expression value)
         {
+            Debug.Assert(value.Type == typeof(string));
+
             if (this.appendStringMethod == null)
-                this.appendStringMethod = appendStringMethodDefinition.MakeGenericMethod(typeof(TFormatter));
+                this.appendStringMethod = InternalHelper.AppendStringMethodDefinition.MakeGenericMethod(typeof(TFormatter));
 
             return Expression.Call(this.appendStringMethod, formatter, value, InternalHelper.DefaultFormatExpr);
         }
 
-        private static readonly MethodInfo appendCharMethodDefinition = appendMethods.First(x => x.GetParameters()[1].ParameterType == typeof(char));
         private MethodInfo appendCharMethod;
         private Expression AppendCharExpr(ParameterExpression formatter, Expression value)
         {
+            Debug.Assert(value.Type == typeof(char));
+
             if (this.appendCharMethod == null)
-                this.appendCharMethod = appendCharMethodDefinition.MakeGenericMethod(typeof(TFormatter));
+                this.appendCharMethod = InternalHelper.AppendCharMethodDefinition.MakeGenericMethod(typeof(TFormatter));
 
             return Expression.Call(this.appendCharMethod, formatter, value, InternalHelper.DefaultFormatExpr);
+        }
+
+        private MethodInfo writeBytesMethod;
+        private Expression WriteBytesExpr(ParameterExpression formatter, Expression value)
+        {
+            Debug.Assert(value.Type == typeof(byte[]));
+
+            if (this.writeBytesMethod == null)
+                this.writeBytesMethod = InternalHelper.WriteBytesMethodDefinition.MakeGenericMethod(typeof(TFormatter));
+
+            return Expression.Call(this.writeBytesMethod, formatter, value);
+        }
+
+        private MethodInfo writeByteMethod;
+        private Expression WriteByteExpr(ParameterExpression formatter, Expression value)
+        {
+            Debug.Assert(value.Type == typeof(byte));
+
+            if (this.writeByteMethod == null)
+                this.writeByteMethod = InternalHelper.WriteByteMethodDefinition.MakeGenericMethod(typeof(TFormatter));
+
+            return Expression.Call(this.writeByteMethod, formatter, value);
+        }
+
+        private Expression WriteCommaExpr(ParameterExpression formatter)
+        {
+            return this.WriteByteExpr(formatter, Expression.Constant((byte)','));
+        }
+
+        private Expression WriteNull(ParameterExpression formatter)
+        {
+            return this.WriteBytesExpr(formatter, InternalHelper.nullUtf8Expr);
         }
 
         private static bool IsIntegerType(Type type)
@@ -69,6 +98,8 @@ namespace JChopper
             var type = target.Type;
             if (IsIntegerType(type))
                 return this.SerializeInteger(target, formatter);
+            if (type == typeof(bool))
+                return this.SerializeBoolean(target, formatter);
             if (type == typeof(float))
                 return this.SerializeFloat(target, formatter);
             if (type == typeof(double))
@@ -91,7 +122,18 @@ namespace JChopper
         protected virtual Expression CreateSerializer(Expression target, ParameterExpression formatter)
         {
             Debug.Assert(target.Type == typeof(T));
-            return this.CreateCommonSerializer(target, formatter) ?? this.SerializeObject(target, formatter);
+            return Expression.Block(
+                Expression.IfThen(
+                    Expression.Not(
+                        Expression.Property(
+                            Expression.Property(formatter, typeof(TFormatter).GetRuntimeProperty(nameof(IFormatter.FormattingData))),
+                            InternalHelper.IsUtf8Property
+                        )
+                    ),
+                    InternalHelper.ThrowNotUtf8ExceptionExpr
+                ),
+                this.CreateCommonSerializer(target, formatter) ?? this.SerializeObject(target, formatter)
+            );
         }
 
         protected virtual Expression SerializeValue(Expression target, ParameterExpression formatter)
@@ -113,15 +155,6 @@ namespace JChopper
             return Expression.Invoke(Expression.Property(null, this.serializerProperty), target, formatter);
         }
 
-        private MethodInfo writeCommaMethod;
-        private Expression WriteCommaExpr(ParameterExpression formatter)
-        {
-            if (this.writeCommaMethod == null)
-                this.writeCommaMethod = InternalHelper.WriteCommaMethod.MakeGenericMethod(typeof(TFormatter));
-
-            return Expression.Call(this.writeCommaMethod, formatter);
-        }
-
         protected virtual Expression SerializeObject(Expression target, ParameterExpression formatter)
         {
             if (target.Type != typeof(T))
@@ -135,12 +168,24 @@ namespace JChopper
                 );
             }
 
-            var type = typeof(T);
-            var properties = type.GetRuntimeProperties()
-                .Where(x => x.CanRead && !x.GetMethod.IsStatic && x.GetMethod.IsPublic);
-            var fields = type.GetRuntimeFields().Where(x => !x.IsStatic && x.IsPublic);
+            var s = InternalHelper.CreateMemberSerializers(target, formatter);
+            var body = s.Length == 0
+                ? this.WriteBytesExpr(formatter, InternalHelper.emptyObjectUtf8Expr)
+                : Expression.Block(
+                    s.SelectMany(x => new[] { x.WriteNameExpr, this.SerializeValue(x.GetValueExpr, formatter) })
+                      .Concat(new[] { this.WriteByteExpr(formatter, Expression.Constant((byte)'}')) }));
 
-            //TODO
+            var local = Expression.Variable(typeof(T), "object");
+
+            return Expression.Block(
+                new[] { local },
+                Expression.Assign(local, target),
+                Expression.IfThenElse(
+                    Expression.Equal(local, Expression.Constant(null)),
+                    this.WriteNull(formatter),
+                    body
+                )
+            );
         }
 
         protected virtual Expression SerializeArray(Expression target, ParameterExpression formatter)
@@ -153,30 +198,38 @@ namespace JChopper
             var loopBreak = Expression.Label("array_loopbreak");
 
             return Expression.Block(
-                new[] { array, len },
-                this.AppendCharExpr(formatter, Expression.Constant('[')),
+                new[] { array },
                 Expression.Assign(array, target),
-                Expression.Assign(len, Expression.ArrayLength(array)),
-                Expression.IfThen(
-                    Expression.GreaterThan(len, Expression.Constant(0)),
+                Expression.IfThenElse(
+                    Expression.Equal(array, Expression.Constant(null)),
+                    this.WriteNull(formatter),
                     Expression.Block(
-                        new[] { i },
-                        this.SerializeValue(Expression.ArrayIndex(array, Expression.Constant(0)), formatter),
-                        Expression.Assign(i, Expression.Constant(1)),
-                        Expression.Loop(
-                            Expression.IfThenElse(
-                                Expression.LessThan(i, len),
-                                Expression.Block(
-                                    this.WriteCommaExpr(formatter),
-                                    this.SerializeValue(Expression.ArrayIndex(array, i), formatter)
-                                ),
-                                Expression.Break(loopBreak)
-                            ),
-                            loopBreak
+                        new[] { len },
+                        this.WriteByteExpr(formatter, Expression.Constant((byte)'[')),
+                        Expression.Assign(len, Expression.ArrayLength(array)),
+                        Expression.IfThen(
+                            Expression.GreaterThan(len, Expression.Constant(0)),
+                            Expression.Block(
+                                new[] { i },
+                                this.SerializeValue(Expression.ArrayIndex(array, Expression.Constant(0)), formatter),
+                                Expression.Assign(i, Expression.Constant(1)),
+                                Expression.Loop(
+                                    Expression.IfThenElse(
+                                        Expression.LessThan(i, len),
+                                        Expression.Block(
+                                            this.WriteCommaExpr(formatter),
+                                            this.SerializeValue(Expression.ArrayIndex(
+                                                array, Expression.PostIncrementAssign(i)), formatter)
+                                        ),
+                                        Expression.Break(loopBreak)
+                                    ),
+                                    loopBreak
+                                )
+                            )
                         )
                     )
                 ),
-                this.AppendCharExpr(formatter, Expression.Constant(']'))
+                this.WriteByteExpr(formatter, Expression.Constant((byte)']'))
             );
         }
 
@@ -185,6 +238,7 @@ namespace JChopper
             var getEnumerator = target.Type.GetRuntimeMethod(nameof(IEnumerable.GetEnumerator), new Type[0]);
             Debug.Assert(getEnumerator != null);
 
+            var enumerable = Expression.Variable(target.Type, "enumerable");
             var enumerator = Expression.Variable(getEnumerator.ReturnType, "enumerator");
             var loopBreak = Expression.Label("enumerable_loopbreak");
             var disposable = Expression.Variable(typeof(IDisposable), "enumerator_disposable");
@@ -198,37 +252,45 @@ namespace JChopper
                 formatter);
 
             return Expression.Block(
-                new[] { enumerator },
-                Expression.Assign(enumerator, Expression.Call(target, getEnumerator)),
-                this.AppendCharExpr(formatter, Expression.Constant('[')),
-                Expression.TryFinally(
-                    Expression.IfThen(
-                        moveNext,
-                        Expression.Block(
-                            writeCurrent,
-                            Expression.Loop(
-                                Expression.IfThenElse(
-                                    moveNext,
-                                    Expression.Block(
-                                        this.WriteCommaExpr(formatter),
-                                        writeCurrent
-                                    ),
-                                    Expression.Break(loopBreak)
-                                ),
-                                loopBreak
-                            )
-                        )
-                    ),
+                new[] { enumerable },
+                Expression.Assign(enumerable, target),
+                Expression.IfThenElse(
+                    Expression.Equal(enumerable, Expression.Constant(null)),
+                    this.WriteNull(formatter),
                     Expression.Block(
-                        new[] { disposable },
-                        Expression.Assign(disposable, Expression.TypeAs(enumerator, typeof(IDisposable))),
-                        Expression.IfThen(
-                            Expression.NotEqual(disposable, Expression.Constant(null)),
-                            Expression.Call(disposable, InternalHelper.DisposeMethod)
-                        )
+                        new[] { enumerator },
+                        Expression.Assign(enumerator, Expression.Call(enumerable, getEnumerator)),
+                        this.WriteByteExpr(formatter, Expression.Constant((byte)'[')),
+                        Expression.TryFinally(
+                            Expression.IfThen(
+                                moveNext,
+                                Expression.Block(
+                                    writeCurrent, // Write the first element
+                                    Expression.Loop(
+                                        Expression.IfThenElse(
+                                            moveNext,
+                                            Expression.Block(
+                                                this.WriteCommaExpr(formatter),
+                                                writeCurrent
+                                            ),
+                                            Expression.Break(loopBreak)
+                                        ),
+                                        loopBreak
+                                    )
+                                )
+                            ),
+                            Expression.Block(
+                                new[] { disposable },
+                                Expression.Assign(disposable, Expression.TypeAs(enumerator, typeof(IDisposable))),
+                                Expression.IfThen(
+                                    Expression.NotEqual(disposable, Expression.Constant(null)),
+                                    Expression.Call(disposable, InternalHelper.DisposeMethod)
+                                )
+                            )
+                        ),
+                        this.WriteByteExpr(formatter, Expression.Constant((byte)']'))
                     )
-                ),
-                this.AppendCharExpr(formatter, Expression.Constant(']'))
+                )
             );
         }
 
@@ -240,6 +302,19 @@ namespace JChopper
                 .First(x => x.Name == nameof(IFormatterExtensions.Append) && x.GetParameters()[1].ParameterType == type)
                 .MakeGenericMethod(formatter.Type);
             return Expression.Call(appendMethod, formatter, target, InternalHelper.IntegerFormatExpr);
+        }
+
+        protected virtual Expression SerializeBoolean(Expression target, ParameterExpression formatter)
+        {
+            Debug.Assert(target.Type == typeof(bool));
+            return this.WriteBytesExpr(
+                formatter,
+                Expression.Condition(
+                    target,
+                    InternalHelper.trueUtf8Expr,
+                    InternalHelper.falseUtf8Expr
+                )
+            );
         }
 
         private Expression FormatG(Expression target, ParameterExpression formatter, MethodInfo toString)
@@ -279,21 +354,6 @@ namespace JChopper
             return this.SerializeString(Expression.Call(InternalHelper.CharToStringStaticMethod, target), formatter);
         }
 
-        private PropertyInfo formattingDataProperty;
-        private PropertyInfo FormattingDataProperty
-        {
-            get
-            {
-                return this.formattingDataProperty ??
-                    (this.formattingDataProperty = typeof(TFormatter).GetRuntimeProperty(nameof(IFormatter.FormattingData)));
-            }
-        }
-
-        private Expression IsUtf16(ParameterExpression formatter)
-        {
-            return Expression.Property(Expression.Property(formatter, this.FormattingDataProperty), InternalHelper.IsUtf16Property);
-        }
-
         protected virtual Expression SerializeString(Expression target, ParameterExpression formatter)
         {
             Debug.Assert(target.Type == typeof(string));
@@ -303,30 +363,15 @@ namespace JChopper
             return Expression.Block(
                 new[] { local },
                 Expression.Assign(local, target),
-                Expression.Condition(
-                    this.IsUtf16(formatter),
-                    Expression.Call(null, InternalHelper.WriteStringToUtf16Method.MakeGenericMethod(formatter.Type), formatter, local),
-                    Expression.Call(null, InternalHelper.WriteStringToUtf8Method.MakeGenericMethod(formatter.Type), formatter, local)
-                )
+                Expression.Call(null, InternalHelper.WriteStringMethodDefinition.MakeGenericMethod(formatter.Type), formatter, local)
             );
-        }
-
-        private Expression WriteNull(ParameterExpression formatter)
-        {
-            return Expression.Call(
-                InternalHelper.WriteBytesMethod.MakeGenericMethod(formatter.Type),
-                Expression.Condition(
-                    this.IsUtf16(formatter),
-                    InternalHelper.nullUtf16Expr,
-                    InternalHelper.nullUtf8Expr
-                ));
         }
 
         protected virtual Expression SerializeNullable(Expression target, ParameterExpression formatter)
         {
             Debug.Assert(target.Type.GetGenericTypeDefinition() == typeof(Nullable<>));
 
-            var local = Expression.Variable(target.Type);
+            var local = Expression.Variable(target.Type, "nullable");
 
             return Expression.Block(
                 new[] { local },
