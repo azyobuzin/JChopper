@@ -256,16 +256,11 @@ namespace JChopper
 
         public static readonly MethodInfo WriteByteMethodDefinition = GetMethod(nameof(WriteByte));
 
-        internal struct MemberSerializer
+        internal class MemberSerializer
         {
-            public MemberSerializer(Expression writeNameExpr, Expression getValueExpr)
-            {
-                this.WriteNameExpr = writeNameExpr;
-                this.GetValueExpr = getValueExpr;
-            }
-
             public Expression WriteNameExpr;
             public Expression GetValueExpr;
+            public Type CustomSerializer;
         }
 
         internal static MemberSerializer[] CreateMemberSerializers(Expression obj, ParameterExpression formatter)
@@ -276,19 +271,22 @@ namespace JChopper
             var writeBytesMethod = WriteBytesMethodDefinition.MakeGenericMethod(formatter.Type);
 
             return obj.Type.GetRuntimeProperties()
-                .Where(x => x.CanRead && !x.GetMethod.IsStatic && x.GetMethod.IsPublic && x.GetIndexParameters().Length == 0)
+                .Where(x => x.CanRead && !x.GetMethod.IsStatic && (x.GetMethod.IsPublic || x.IsDefined(typeof(DataMemberAttribute))) && x.GetIndexParameters().Length == 0)
                 .Select(x => Tuple.Create(x as MemberInfo, Expression.Property(obj, x)))
                 .Concat(
-                    obj.Type.GetRuntimeFields().Where(x => !x.IsStatic && x.IsPublic)
+                    obj.Type.GetRuntimeFields().Where(x => !x.IsStatic && (x.IsPublic || x.IsDefined(typeof(DataMemberAttribute))))
                     .Select(x => Tuple.Create(x as MemberInfo, Expression.Field(obj, x)))
                 )
                 .Where(x => !x.Item1.IsDefined(typeof(IgnoreDataMemberAttribute)))
                 .Select(x =>
                 {
-                    var attr = x.Item1.GetCustomAttribute<DataMemberAttribute>();
-                    return attr == null
-                        ? Tuple.Create(-1, x.Item1.Name, x.Item2)
-                        : Tuple.Create(attr.Order, attr.Name ?? x.Item1.Name, x.Item2);
+                    //TODO?: Supporting EmitDefaultValue is difficult...
+
+                    var dataMemberAttr = x.Item1.GetCustomAttribute<DataMemberAttribute>();
+                    var customSerializer = x.Item1.GetCustomAttribute<CustomSerializerAttribute>()?.CustomSerializerType;
+                    return dataMemberAttr == null
+                        ? Tuple.Create(-1, x.Item1.Name, x.Item2, customSerializer)
+                        : Tuple.Create(dataMemberAttr.Order, dataMemberAttr.Name ?? x.Item1.Name, x.Item2, customSerializer);
                 })
                 .OrderBy(x => x.Item1)
                 .ThenBy(x => x.Item2)
@@ -305,10 +303,12 @@ namespace JChopper
                     nameBytes[commitedByteCount + 1] = (byte)':';
                     Buffer.BlockCopy(bufFormatter.Buffer, 0, nameBytes, 1, commitedByteCount);
 
-                    return new MemberSerializer(
-                        Expression.Call(writeBytesMethod, formatter, Expression.Constant(nameBytes)),
-                        x.Item3
-                    );
+                    return new MemberSerializer
+                    {
+                        WriteNameExpr = Expression.Call(writeBytesMethod, formatter, Expression.Constant(nameBytes)),
+                        GetValueExpr = x.Item3,
+                        CustomSerializer = x.Item4
+                    };
                 })
                 .ToArray();
         }

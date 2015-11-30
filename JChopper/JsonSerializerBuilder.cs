@@ -95,6 +95,8 @@ namespace JChopper
 
         private Expression CreateCommonSerializer(Expression target, ParameterExpression formatter)
         {
+            //TODO: Support Utf8String
+            //TODO: CustomSerializer
             var type = target.Type;
             if (IsIntegerType(type))
                 return this.SerializeInteger(target, formatter);
@@ -114,6 +116,7 @@ namespace JChopper
                 return this.SerializeNullable(target, formatter);
             if (type.IsArray)
                 return this.SerializeArray(target, formatter);
+            //TODO: AsJsonObjectAttribute
             if (typeof(IEnumerable).GetTypeInfo().IsAssignableFrom(type.GetTypeInfo()))
                 return this.SerializeEnumerable(target, formatter);
             return null;
