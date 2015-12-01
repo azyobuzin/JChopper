@@ -1,9 +1,11 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio 14
-VisualStudioVersion = 14.0.23107.0
+VisualStudioVersion = 14.0.24720.0
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "JChopper", "JChopper\JChopper.csproj", "{B9CB83D5-1BF2-4C15-BE92-5AC88AEF0351}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "JChopper.Test", "JChopper.Test\JChopper.Test.csproj", "{382D5183-AE79-40FD-9576-300653A68E8B}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -15,6 +17,10 @@ Global
 		{B9CB83D5-1BF2-4C15-BE92-5AC88AEF0351}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{B9CB83D5-1BF2-4C15-BE92-5AC88AEF0351}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{B9CB83D5-1BF2-4C15-BE92-5AC88AEF0351}.Release|Any CPU.Build.0 = Release|Any CPU
+		{382D5183-AE79-40FD-9576-300653A68E8B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{382D5183-AE79-40FD-9576-300653A68E8B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{382D5183-AE79-40FD-9576-300653A68E8B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{382D5183-AE79-40FD-9576-300653A68E8B}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

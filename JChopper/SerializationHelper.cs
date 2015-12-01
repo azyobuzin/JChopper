@@ -48,6 +48,8 @@ namespace JChopper
         internal static readonly MethodInfo MoveNextMethod = typeof(IEnumerator).GetRuntimeMethod(nameof(IEnumerator.MoveNext), new Type[0]);
         internal static readonly MethodInfo DisposeMethod = typeof(IDisposable).GetRuntimeMethod(nameof(IDisposable.Dispose), new Type[0]);
 
+        internal static readonly MethodInfo SerializeMethodDefinition = typeof(IJsonSerializer).GetTypeInfo().GetDeclaredMethod("Serialize");
+
         internal static readonly Expression ThrowNotUtf8ExceptionExpr = Expression.Throw(Expression.New(
             typeof(ArgumentException).GetTypeInfo().DeclaredConstructors.First(x => x.GetParameters().Length == 1),
             Expression.Constant("The specified formatter is not for UTF-8.")));

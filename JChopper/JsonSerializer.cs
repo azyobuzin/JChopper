@@ -5,11 +5,13 @@ using System.Text.Utf8;
 
 namespace JChopper
 {
-    public class JsonSerializer
+    public class JsonSerializer : IJsonSerializer
     {
         public virtual void Serialize<T>(T obj, IFormatter formatter)
         {
-            new JsonSerializerBuilder<T>().GetSerializer().Invoke(obj, formatter);
+            var serializer = JsonSerializerCache<T>.Serializer
+                ?? (JsonSerializerCache<T>.Serializer = new JsonSerializerBuilder<T>(this).GetSerializer());
+            serializer(obj, formatter);
         }
 
         public Utf8String Serialize<T>(T obj)
@@ -25,5 +27,10 @@ namespace JChopper
             using (var formatter = new StreamFormatter(stream, FormattingData.InvariantUtf8, ManagedBufferPool<byte>.SharedByteBufferPool))
                 this.Serialize(obj, formatter);
         }
+    }
+
+    public interface IJsonSerializer
+    {
+        void Serialize<T>(T obj, IFormatter formatter);
     }
 }

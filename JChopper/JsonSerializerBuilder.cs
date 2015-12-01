@@ -9,30 +9,22 @@ using System.Text.Formatting;
 namespace JChopper
 {
     //TODO: formatter をインスタンスフィールドにする
-    //TODO: キャッシュ周りは JsonSerializer に
     public class JsonSerializerBuilder<T>
     {
+        public JsonSerializerBuilder(IJsonSerializer parent)
+        {
+            this.Parent = parent;
+            this.parentExpr = Expression.Constant(parent);
+        }
+
+        public IJsonSerializer Parent { get; }
+        private readonly Expression parentExpr;
+
         public virtual Action<T, IFormatter> GetSerializer()
         {
-            var serializer = this.GetCache();
-            if (serializer == null)
-            {
-                var prmObj = Expression.Parameter(typeof(T), "obj");
-                var prmFormatter = Expression.Parameter(typeof(IFormatter), "formatter");
-                serializer = Expression.Lambda<Action<T, IFormatter>>(CreateSerializer(prmObj, prmFormatter), prmObj, prmFormatter).Compile();
-                this.SetCache(serializer);
-            }
-            return serializer;
-        }
-
-        protected virtual Action<T, IFormatter> GetCache()
-        {
-            return JsonSerializerCache<T>.Serializer;
-        }
-
-        protected virtual void SetCache(Action<T, IFormatter> value)
-        {
-            JsonSerializerCache<T>.Serializer = value;
+            var prmObj = Expression.Parameter(typeof(T), "obj");
+            var prmFormatter = Expression.Parameter(typeof(IFormatter), "formatter");
+            return Expression.Lambda<Action<T, IFormatter>>(CreateSerializer(prmObj, prmFormatter), prmObj, prmFormatter).Compile();
         }
 
         private Expression AppendStringExpr(ParameterExpression formatter, Expression value)
@@ -124,34 +116,21 @@ namespace JChopper
         protected virtual Expression SerializeValue(Expression target, ParameterExpression formatter)
         {
             return this.CreateCommonSerializer(target, formatter) ??
-                (target.Type == typeof(T)
-                ? this.SerializeRecursiveObject(target, formatter)
-                : this.SerializeObject(target, formatter));
+                this.SerializeOtherObject(target, formatter);
         }
 
-        private PropertyInfo serializerProperty;
-
-        protected virtual Expression SerializeRecursiveObject(Expression target, ParameterExpression formatter)
+        protected virtual Expression SerializeOtherObject(Expression target, ParameterExpression formatter)
         {
-            if (this.serializerProperty == null)
-                this.serializerProperty = typeof(JsonSerializerCache<T>)
-                    .GetRuntimeProperty(nameof(JsonSerializerCache<T>.Serializer));
-
-            return Expression.Invoke(Expression.Property(null, this.serializerProperty), target, formatter);
+            return Expression.Call(
+                this.parentExpr,
+                SerializationHelper.SerializeMethodDefinition.MakeGenericMethod(target.Type),
+                target,
+                formatter);
         }
 
         protected virtual Expression SerializeObject(Expression target, ParameterExpression formatter)
         {
-            if (target.Type != typeof(T))
-            {
-                return Expression.Invoke(
-                    Expression.Call(
-                        Expression.New(this.GetType().GetGenericTypeDefinition().MakeGenericType(target.Type)),
-                        nameof(GetSerializer), new Type[0]),
-                    target,
-                    formatter
-                );
-            }
+            Debug.Assert(target.Type == typeof(T));
 
             var s = SerializationHelper.CreateMemberSerializers(target, formatter);
             var body = s.Length == 0
