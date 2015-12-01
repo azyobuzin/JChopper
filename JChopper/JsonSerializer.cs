@@ -7,9 +7,9 @@ namespace JChopper
 {
     public class JsonSerializer
     {
-        public virtual void Serialize<T, TFormatter>(T obj, TFormatter formatter) where TFormatter : IFormatter
+        public virtual void Serialize<T>(T obj, IFormatter formatter)
         {
-            new JsonSerializerBuilder<T, TFormatter>().GetSerializer().Invoke(obj, formatter);
+            new JsonSerializerBuilder<T>().GetSerializer().Invoke(obj, formatter);
         }
 
         public Utf8String Serialize<T>(T obj)

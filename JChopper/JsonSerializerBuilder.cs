@@ -8,73 +8,55 @@ using System.Text.Formatting;
 
 namespace JChopper
 {
-    public class JsonSerializerBuilder<T, TFormatter> where TFormatter : IFormatter
+    //TODO: formatter をインスタンスフィールドにする
+    //TODO: キャッシュ周りは JsonSerializer に
+    public class JsonSerializerBuilder<T>
     {
-        public virtual Action<T, TFormatter> GetSerializer()
+        public virtual Action<T, IFormatter> GetSerializer()
         {
             var serializer = this.GetCache();
             if (serializer == null)
             {
                 var prmObj = Expression.Parameter(typeof(T), "obj");
-                var prmFormatter = Expression.Parameter(typeof(TFormatter), "formatter");
-                serializer = Expression.Lambda<Action<T, TFormatter>>(CreateSerializer(prmObj, prmFormatter), prmObj, prmFormatter).Compile();
+                var prmFormatter = Expression.Parameter(typeof(IFormatter), "formatter");
+                serializer = Expression.Lambda<Action<T, IFormatter>>(CreateSerializer(prmObj, prmFormatter), prmObj, prmFormatter).Compile();
                 this.SetCache(serializer);
             }
             return serializer;
         }
 
-        protected virtual Action<T, TFormatter> GetCache()
+        protected virtual Action<T, IFormatter> GetCache()
         {
-            return JsonSerializerCache<T, TFormatter>.Serializer;
+            return JsonSerializerCache<T>.Serializer;
         }
 
-        protected virtual void SetCache(Action<T, TFormatter> value)
+        protected virtual void SetCache(Action<T, IFormatter> value)
         {
-            JsonSerializerCache<T, TFormatter>.Serializer = value;
+            JsonSerializerCache<T>.Serializer = value;
         }
 
-        private MethodInfo appendStringMethod;
         private Expression AppendStringExpr(ParameterExpression formatter, Expression value)
         {
             Debug.Assert(value.Type == typeof(string));
-
-            if (this.appendStringMethod == null)
-                this.appendStringMethod = InternalHelper.AppendStringMethodDefinition.MakeGenericMethod(typeof(TFormatter));
-
-            return Expression.Call(this.appendStringMethod, formatter, value, InternalHelper.DefaultFormatExpr);
+            return Expression.Call(SerializationHelper.AppendStringMethod, formatter, value, SerializationHelper.DefaultFormatExpr);
         }
 
-        private MethodInfo appendCharMethod;
         private Expression AppendCharExpr(ParameterExpression formatter, Expression value)
         {
             Debug.Assert(value.Type == typeof(char));
-
-            if (this.appendCharMethod == null)
-                this.appendCharMethod = InternalHelper.AppendCharMethodDefinition.MakeGenericMethod(typeof(TFormatter));
-
-            return Expression.Call(this.appendCharMethod, formatter, value, InternalHelper.DefaultFormatExpr);
+            return Expression.Call(SerializationHelper.AppendCharMethod, formatter, value, SerializationHelper.DefaultFormatExpr);
         }
 
-        private MethodInfo writeBytesMethod;
         private Expression WriteBytesExpr(ParameterExpression formatter, Expression value)
         {
             Debug.Assert(value.Type == typeof(byte[]));
-
-            if (this.writeBytesMethod == null)
-                this.writeBytesMethod = InternalHelper.WriteBytesMethodDefinition.MakeGenericMethod(typeof(TFormatter));
-
-            return Expression.Call(this.writeBytesMethod, formatter, value);
+            return Expression.Call(SerializationHelper.WriteBytesMethod, formatter, value);
         }
 
-        private MethodInfo writeByteMethod;
         private Expression WriteByteExpr(ParameterExpression formatter, Expression value)
         {
             Debug.Assert(value.Type == typeof(byte));
-
-            if (this.writeByteMethod == null)
-                this.writeByteMethod = InternalHelper.WriteByteMethodDefinition.MakeGenericMethod(typeof(TFormatter));
-
-            return Expression.Call(this.writeByteMethod, formatter, value);
+            return Expression.Call(SerializationHelper.WriteByteMethod, formatter, value);
         }
 
         private Expression WriteCommaExpr(ParameterExpression formatter)
@@ -84,7 +66,7 @@ namespace JChopper
 
         private Expression WriteNull(ParameterExpression formatter)
         {
-            return this.WriteBytesExpr(formatter, InternalHelper.nullUtf8Expr);
+            return this.WriteBytesExpr(formatter, SerializationHelper.nullUtf8Expr);
         }
 
         private static bool IsIntegerType(Type type)
@@ -116,8 +98,8 @@ namespace JChopper
                 return this.SerializeNullable(target, formatter);
             if (type.IsArray)
                 return this.SerializeArray(target, formatter);
-            //TODO: AsJsonObjectAttribute
-            if (typeof(IEnumerable).GetTypeInfo().IsAssignableFrom(type.GetTypeInfo()))
+            if (!type.GetTypeInfo().IsDefined(typeof(AsJsonObjectAttribute))
+                && typeof(IEnumerable).GetTypeInfo().IsAssignableFrom(type.GetTypeInfo()))
                 return this.SerializeEnumerable(target, formatter);
             return null;
         }
@@ -129,11 +111,11 @@ namespace JChopper
                 Expression.IfThen(
                     Expression.Not(
                         Expression.Property(
-                            Expression.Property(formatter, typeof(TFormatter).GetRuntimeProperty(nameof(IFormatter.FormattingData))),
-                            InternalHelper.IsUtf8Property
+                            Expression.Property(formatter, typeof(IFormatter).GetRuntimeProperty(nameof(IFormatter.FormattingData))),//TODO: cache
+                            SerializationHelper.IsUtf8Property
                         )
                     ),
-                    InternalHelper.ThrowNotUtf8ExceptionExpr
+                    SerializationHelper.ThrowNotUtf8ExceptionExpr
                 ),
                 this.CreateCommonSerializer(target, formatter) ?? this.SerializeObject(target, formatter)
             );
@@ -152,8 +134,8 @@ namespace JChopper
         protected virtual Expression SerializeRecursiveObject(Expression target, ParameterExpression formatter)
         {
             if (this.serializerProperty == null)
-                this.serializerProperty = typeof(JsonSerializerCache<T, TFormatter>)
-                    .GetRuntimeProperty(nameof(JsonSerializerCache<T, TFormatter>.Serializer));
+                this.serializerProperty = typeof(JsonSerializerCache<T>)
+                    .GetRuntimeProperty(nameof(JsonSerializerCache<T>.Serializer));
 
             return Expression.Invoke(Expression.Property(null, this.serializerProperty), target, formatter);
         }
@@ -164,16 +146,16 @@ namespace JChopper
             {
                 return Expression.Invoke(
                     Expression.Call(
-                        Expression.New(this.GetType().GetGenericTypeDefinition().MakeGenericType(target.Type, typeof(TFormatter))),
+                        Expression.New(this.GetType().GetGenericTypeDefinition().MakeGenericType(target.Type)),
                         nameof(GetSerializer), new Type[0]),
                     target,
                     formatter
                 );
             }
 
-            var s = InternalHelper.CreateMemberSerializers(target, formatter);
+            var s = SerializationHelper.CreateMemberSerializers(target, formatter);
             var body = s.Length == 0
-                ? this.WriteBytesExpr(formatter, InternalHelper.emptyObjectUtf8Expr)
+                ? this.WriteBytesExpr(formatter, SerializationHelper.emptyObjectUtf8Expr)
                 : Expression.Block(
                     s.SelectMany(x => new[] { x.WriteNameExpr, this.SerializeValue(x.GetValueExpr, formatter) })
                       .Concat(new[] { this.WriteByteExpr(formatter, Expression.Constant((byte)'}')) }));
@@ -246,7 +228,9 @@ namespace JChopper
             var loopBreak = Expression.Label("enumerable_loopbreak");
             var disposable = Expression.Variable(typeof(IDisposable), "enumerator_disposable");
 
-            var moveNext = Expression.Call(enumerator, getEnumerator.ReturnType.GetRuntimeMethod("MoveNext", new Type[0]));
+            var moveNext = Expression.Call(enumerator,
+                getEnumerator.ReturnType.GetRuntimeMethod("MoveNext", new Type[0]) // Duck typing
+                ?? SerializationHelper.MoveNextMethod); // IEnumerator
             var writeCurrent = this.SerializeValue(
                 Expression.Property(
                     enumerator,
@@ -287,7 +271,7 @@ namespace JChopper
                                 Expression.Assign(disposable, Expression.TypeAs(enumerator, typeof(IDisposable))),
                                 Expression.IfThen(
                                     Expression.NotEqual(disposable, Expression.Constant(null)),
-                                    Expression.Call(disposable, InternalHelper.DisposeMethod)
+                                    Expression.Call(disposable, SerializationHelper.DisposeMethod)
                                 )
                             )
                         ),
@@ -304,7 +288,7 @@ namespace JChopper
             var appendMethod = typeof(IFormatterExtensions).GetRuntimeMethods()
                 .First(x => x.Name == nameof(IFormatterExtensions.Append) && x.GetParameters()[1].ParameterType == type)
                 .MakeGenericMethod(formatter.Type);
-            return Expression.Call(appendMethod, formatter, target, InternalHelper.IntegerFormatExpr);
+            return Expression.Call(appendMethod, formatter, target, SerializationHelper.IntegerFormatExpr);
         }
 
         protected virtual Expression SerializeBoolean(Expression target, ParameterExpression formatter)
@@ -314,8 +298,8 @@ namespace JChopper
                 formatter,
                 Expression.Condition(
                     target,
-                    InternalHelper.trueUtf8Expr,
-                    InternalHelper.falseUtf8Expr
+                    SerializationHelper.trueUtf8Expr,
+                    SerializationHelper.falseUtf8Expr
                 )
             );
         }
@@ -328,7 +312,7 @@ namespace JChopper
                     target,
                     toString,
                     Expression.Constant("G"),
-                    InternalHelper.InvariantCultureExpr
+                    SerializationHelper.InvariantCultureExpr
                 )
             );
         }
@@ -336,25 +320,25 @@ namespace JChopper
         protected virtual Expression SerializeFloat(Expression target, ParameterExpression formatter)
         {
             Debug.Assert(target.Type == typeof(float));
-            return this.FormatG(target, formatter, InternalHelper.FloatToStringMethod);
+            return this.FormatG(target, formatter, SerializationHelper.FloatToStringMethod);
         }
 
         protected virtual Expression SerializeDouble(Expression target, ParameterExpression formatter)
         {
             Debug.Assert(target.Type == typeof(double));
-            return this.FormatG(target, formatter, InternalHelper.DoubleToStringMethod);
+            return this.FormatG(target, formatter, SerializationHelper.DoubleToStringMethod);
         }
 
         protected virtual Expression SerializeDecimal(Expression target, ParameterExpression formatter)
         {
             Debug.Assert(target.Type == typeof(decimal));
-            return this.FormatG(target, formatter, InternalHelper.DecimalToStringMethod);
+            return this.FormatG(target, formatter, SerializationHelper.DecimalToStringMethod);
         }
 
         protected virtual Expression SerializeChar(Expression target, ParameterExpression formatter)
         {
             Debug.Assert(target.Type == typeof(char));
-            return this.SerializeString(Expression.Call(InternalHelper.CharToStringStaticMethod, target), formatter);
+            return this.SerializeString(Expression.Call(SerializationHelper.CharToStringStaticMethod, target), formatter);
         }
 
         protected virtual Expression SerializeString(Expression target, ParameterExpression formatter)
@@ -366,7 +350,7 @@ namespace JChopper
             return Expression.Block(
                 new[] { local },
                 Expression.Assign(local, target),
-                Expression.Call(null, InternalHelper.WriteStringMethodDefinition.MakeGenericMethod(formatter.Type), formatter, local)
+                Expression.Call(null, SerializationHelper.WriteStringMethod, formatter, local)
             );
         }
 

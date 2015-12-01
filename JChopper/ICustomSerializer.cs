@@ -5,7 +5,7 @@ namespace JChopper
 {
     public interface ICustomSerializer<T>
     {
-        void Serialize<TFormatter>(T obj, TFormatter formatter) where TFormatter : IFormatter;
+        void Serialize(T obj, IFormatter formatter);
         T Deserialize(Utf8String json);
     }
 }

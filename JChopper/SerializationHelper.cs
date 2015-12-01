@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Buffers;
+using System.Collections;
 using System.Globalization;
 using System.Linq;
 using System.Linq.Expressions;
@@ -11,52 +12,43 @@ using System.Text.Formatting;
 
 namespace JChopper
 {
-    static class InternalHelper
+    static class SerializationHelper
     {
-        private static FieldInfo GetField(string name)
+        private static MemberExpression MemberExpr<T>(Expression<Func<T>> expr)
         {
-            return typeof(InternalHelper).GetRuntimeField(name);
-        }
-
-        private static MemberExpression FieldExpr(string name)
-        {
-            return Expression.Field(null, GetField(name));
+            return ((MemberExpression)expr.Body);
         }
 
         private static MethodInfo GetMethod(string name)
         {
-            return typeof(InternalHelper).GetTypeInfo().GetDeclaredMethod(name);
+            return typeof(SerializationHelper).GetTypeInfo().GetDeclaredMethod(name);
         }
 
-        // Fields are public for GetRuntimeField
+        private static readonly Format.Parsed DefaultFormat = default(Format.Parsed);
+        internal static readonly MemberExpression DefaultFormatExpr = MemberExpr(() => DefaultFormat);
 
-        public static readonly Type[] EmptyTypeArray = new Type[0];
+        private static readonly Format.Parsed IntegerFormat = Format.Parse('D');
+        internal static readonly MemberExpression IntegerFormatExpr = MemberExpr(() => IntegerFormat);
 
-        public static readonly Format.Parsed DefaultFormat = default(Format.Parsed);
-        public static readonly MemberExpression DefaultFormatExpr = FieldExpr(nameof(DefaultFormat));
+        internal static readonly MethodInfo FloatToStringMethod = typeof(float).GetRuntimeMethod(nameof(float.ToString), new[] { typeof(string), typeof(IFormatProvider) });
+        internal static readonly MethodInfo DoubleToStringMethod = typeof(double).GetRuntimeMethod(nameof(double.ToString), new[] { typeof(string), typeof(IFormatProvider) });
+        internal static readonly MethodInfo DecimalToStringMethod = typeof(decimal).GetRuntimeMethod(nameof(double.ToString), new[] { typeof(string), typeof(IFormatProvider) });
+        internal static readonly MethodInfo CharToStringStaticMethod = typeof(char).GetRuntimeMethod(nameof(char.ToString), new[] { typeof(char) });
 
-        public static readonly Format.Parsed IntegerFormat = Format.Parse('D');
-        public static readonly MemberExpression IntegerFormatExpr = FieldExpr(nameof(IntegerFormat));
-
-        public static readonly MethodInfo FloatToStringMethod = typeof(float).GetRuntimeMethod(nameof(float.ToString), new[] { typeof(string), typeof(IFormatProvider) });
-        public static readonly MethodInfo DoubleToStringMethod = typeof(double).GetRuntimeMethod(nameof(double.ToString), new[] { typeof(string), typeof(IFormatProvider) });
-        public static readonly MethodInfo DecimalToStringMethod = typeof(decimal).GetRuntimeMethod(nameof(double.ToString), new[] { typeof(string), typeof(IFormatProvider) });
-        public static readonly MethodInfo CharToStringStaticMethod = typeof(char).GetRuntimeMethod(nameof(char.ToString), new[] { typeof(char) });
-
-        public static readonly PropertyInfo InvariantCultureProperty = typeof(CultureInfo).GetRuntimeProperty(nameof(CultureInfo.InvariantCulture));
-        public static readonly MemberExpression InvariantCultureExpr = Expression.Property(null, InvariantCultureProperty);
+        internal static readonly MemberExpression InvariantCultureExpr = MemberExpr(() => CultureInfo.InvariantCulture);
 
         private static readonly MethodInfo[] appendMethods = typeof(IFormatterExtensions).GetTypeInfo().DeclaredMethods
            .Where(x => x.Name == nameof(IFormatterExtensions.Append)).ToArray();
-        public static readonly MethodInfo AppendStringMethodDefinition = appendMethods.First(x => x.GetParameters()[1].ParameterType == typeof(string));
-        public static readonly MethodInfo AppendCharMethodDefinition = appendMethods.First(x => x.GetParameters()[1].ParameterType == typeof(char));
+        internal static readonly MethodInfo AppendStringMethod = appendMethods.First(x => x.GetParameters()[1].ParameterType == typeof(string)).MakeGenericMethod(typeof(IFormatter));
+        internal static readonly MethodInfo AppendCharMethod = appendMethods.First(x => x.GetParameters()[1].ParameterType == typeof(char)).MakeGenericMethod(typeof(IFormatter));
 
-        public static readonly PropertyInfo IsUtf16Property = typeof(FormattingData).GetTypeInfo().DeclaredProperties.First(x => x.Name == "IsUtf16");
-        public static readonly PropertyInfo IsUtf8Property = typeof(FormattingData).GetTypeInfo().DeclaredProperties.First(x => x.Name == "IsUtf8");
+        internal static readonly PropertyInfo IsUtf16Property = typeof(FormattingData).GetTypeInfo().DeclaredProperties.First(x => x.Name == "IsUtf16");
+        internal static readonly PropertyInfo IsUtf8Property = typeof(FormattingData).GetTypeInfo().DeclaredProperties.First(x => x.Name == "IsUtf8");
 
-        public static readonly MethodInfo DisposeMethod = typeof(IDisposable).GetRuntimeMethod(nameof(IDisposable.Dispose), EmptyTypeArray);
+        internal static readonly MethodInfo MoveNextMethod = typeof(IEnumerator).GetRuntimeMethod(nameof(IEnumerator.MoveNext), new Type[0]);
+        internal static readonly MethodInfo DisposeMethod = typeof(IDisposable).GetRuntimeMethod(nameof(IDisposable.Dispose), new Type[0]);
 
-        public static readonly Expression ThrowNotUtf8ExceptionExpr = Expression.Throw(Expression.New(
+        internal static readonly Expression ThrowNotUtf8ExceptionExpr = Expression.Throw(Expression.New(
             typeof(ArgumentException).GetTypeInfo().DeclaredConstructors.First(x => x.GetParameters().Length == 1),
             Expression.Constant("The specified formatter is not for UTF-8.")));
 
@@ -64,8 +56,7 @@ namespace JChopper
         private static readonly byte[] u001Utf8 = Encoding.UTF8.GetBytes("\\u001");
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static void RequireBuffer<TFormatter>(ref Span<byte> buffer, ref int bytesWritten, TFormatter formatter, int requiredBytes)
-            where TFormatter : IFormatter
+        private static void RequireBuffer(ref Span<byte> buffer, ref int bytesWritten, IFormatter formatter, int requiredBytes)
         {
             if (buffer.Length >= requiredBytes)
                 return;
@@ -87,8 +78,7 @@ namespace JChopper
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static Span<byte> RequireBuffer<TFormatter>(TFormatter formatter, int requiredBytes)
-            where TFormatter : IFormatter
+        private static Span<byte> RequireBuffer(IFormatter formatter, int requiredBytes)
         {
             Span<byte> buffer;
             while ((buffer = formatter.FreeBuffer).Length < requiredBytes)
@@ -96,7 +86,7 @@ namespace JChopper
             return buffer;
         }
 
-        public static void WriteString<TFormatter>(TFormatter formatter, string value) where TFormatter : IFormatter
+        public static void WriteString(IFormatter formatter, string value)
         {
             var buffer = RequireBuffer(formatter, 2);
 
@@ -225,36 +215,36 @@ namespace JChopper
             formatter.CommitBytes(bytesWritten + 1);
         }
 
-        public static readonly MethodInfo WriteStringMethodDefinition = GetMethod(nameof(WriteString));
+        internal static readonly MethodInfo WriteStringMethod = GetMethod(nameof(WriteString));
 
-        public static readonly byte[] nullUtf8 = Encoding.UTF8.GetBytes("null");
-        public static readonly byte[] trueUtf8 = Encoding.UTF8.GetBytes("true");
-        public static readonly byte[] falseUtf8 = Encoding.UTF8.GetBytes("false");
-        public static readonly byte[] emptyObjectUtf8 = Encoding.UTF8.GetBytes("{}");
+        private static readonly byte[] nullUtf8 = Encoding.UTF8.GetBytes("null");
+        private static readonly byte[] trueUtf8 = Encoding.UTF8.GetBytes("true");
+        private static readonly byte[] falseUtf8 = Encoding.UTF8.GetBytes("false");
+        private static readonly byte[] emptyObjectUtf8 = Encoding.UTF8.GetBytes("{}");
 
-        public static readonly MemberExpression nullUtf8Expr = FieldExpr(nameof(nullUtf8));
-        public static readonly MemberExpression trueUtf8Expr = FieldExpr(nameof(trueUtf8));
-        public static readonly MemberExpression falseUtf8Expr = FieldExpr(nameof(falseUtf8));
-        public static readonly MemberExpression emptyObjectUtf8Expr = FieldExpr(nameof(emptyObjectUtf8));
+        internal static readonly MemberExpression nullUtf8Expr = MemberExpr(() => nullUtf8);
+        internal static readonly MemberExpression trueUtf8Expr = MemberExpr(() => trueUtf8);
+        internal static readonly MemberExpression falseUtf8Expr = MemberExpr(() => falseUtf8);
+        internal static readonly MemberExpression emptyObjectUtf8Expr = MemberExpr(() => emptyObjectUtf8);
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static void WriteBytes<TFormatter>(TFormatter formatter, byte[] value) where TFormatter : IFormatter
+        public static void WriteBytes(IFormatter formatter, byte[] value)
         {
             RequireBuffer(formatter, value.Length).Set(value);
             formatter.CommitBytes(value.Length);
         }
 
-        public static readonly MethodInfo WriteBytesMethodDefinition = GetMethod(nameof(WriteBytes));
+        internal static readonly MethodInfo WriteBytesMethod = GetMethod(nameof(WriteBytes));
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static void WriteByte<TFormatter>(TFormatter formatter, byte value) where TFormatter : IFormatter
+        public static void WriteByte(IFormatter formatter, byte value)
         {
             var buffer = RequireBuffer(formatter, 1);
             buffer[0] = value;
             formatter.CommitBytes(1);
         }
 
-        public static readonly MethodInfo WriteByteMethodDefinition = GetMethod(nameof(WriteByte));
+        internal static readonly MethodInfo WriteByteMethod = GetMethod(nameof(WriteByte));
 
         internal class MemberSerializer
         {
@@ -268,7 +258,6 @@ namespace JChopper
             // BufferFormatter for escaping property names.
             // Create an instance of ManagedBufferPool since a BufferFormatter never returns it's buffer.
             var bufFormatter = new BufferFormatter(30, FormattingData.InvariantUtf8, new ManagedBufferPool<byte>());
-            var writeBytesMethod = WriteBytesMethodDefinition.MakeGenericMethod(formatter.Type);
 
             return obj.Type.GetRuntimeProperties()
                 .Where(x => x.CanRead && !x.GetMethod.IsStatic && (x.GetMethod.IsPublic || x.IsDefined(typeof(DataMemberAttribute))) && x.GetIndexParameters().Length == 0)
@@ -305,7 +294,7 @@ namespace JChopper
 
                     return new MemberSerializer
                     {
-                        WriteNameExpr = Expression.Call(writeBytesMethod, formatter, Expression.Constant(nameBytes)),
+                        WriteNameExpr = Expression.Call(WriteBytesMethod, formatter, Expression.Constant(nameBytes)),
                         GetValueExpr = x.Item3,
                         CustomSerializer = x.Item4
                     };

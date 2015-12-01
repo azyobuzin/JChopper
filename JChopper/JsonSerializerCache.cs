@@ -3,8 +3,8 @@ using System.Text.Formatting;
 
 namespace JChopper
 {
-    static class JsonSerializerCache<T, TFormatter> where TFormatter : IFormatter
+    static class JsonSerializerCache<T>
     {
-        public static Action<T, TFormatter> Serializer { get; set; }
+        public static Action<T, IFormatter> Serializer { get; set; }
     }
 }
