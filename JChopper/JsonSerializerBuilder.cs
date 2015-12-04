@@ -1,14 +1,15 @@
 ﻿using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Text.Formatting;
+using System.Text.Utf8;
 
 namespace JChopper
 {
-    //TODO: formatter をインスタンスフィールドにする
     public class JsonSerializerBuilder<T>
     {
         public JsonSerializerBuilder(IJsonSerializer parent)
@@ -20,45 +21,52 @@ namespace JChopper
         public IJsonSerializer Parent { get; }
         private readonly Expression parentExpr;
 
-        public virtual Action<T, IFormatter> GetSerializer()
+        protected ParameterExpression FormatterParameter { get; } = Expression.Parameter(typeof(IFormatter), "formatter");
+
+        private readonly Dictionary<Type, ConstantExpression> customSerializers = new Dictionary<Type, ConstantExpression>();
+
+        public virtual Action<T, IFormatter> CreateSerializer()
         {
             var prmObj = Expression.Parameter(typeof(T), "obj");
-            var prmFormatter = Expression.Parameter(typeof(IFormatter), "formatter");
-            return Expression.Lambda<Action<T, IFormatter>>(CreateSerializer(prmObj, prmFormatter), prmObj, prmFormatter).Compile();
+            return Expression.Lambda<Action<T, IFormatter>>(
+                CreateSerializerExpression(prmObj),
+                prmObj,
+                this.FormatterParameter
+            ).Compile();
         }
 
-        private Expression AppendStringExpr(ParameterExpression formatter, Expression value)
+        private Expression AppendStringExpr(Expression value)
         {
             Debug.Assert(value.Type == typeof(string));
-            return Expression.Call(SerializationHelper.AppendStringMethod, formatter, value, SerializationHelper.DefaultFormatExpr);
+            return Expression.Call(SerializationHelper.AppendStringMethod, this.FormatterParameter, value, SerializationHelper.DefaultFormatExpr);
         }
 
-        private Expression AppendCharExpr(ParameterExpression formatter, Expression value)
+        private Expression AppendCharExpr(Expression value)
         {
             Debug.Assert(value.Type == typeof(char));
-            return Expression.Call(SerializationHelper.AppendCharMethod, formatter, value, SerializationHelper.DefaultFormatExpr);
+            return Expression.Call(SerializationHelper.AppendCharMethod, this.FormatterParameter, value, SerializationHelper.DefaultFormatExpr);
         }
 
-        private Expression WriteBytesExpr(ParameterExpression formatter, Expression value)
+        private Expression WriteBytesExpr(Expression value)
         {
             Debug.Assert(value.Type == typeof(byte[]));
-            return Expression.Call(SerializationHelper.WriteBytesMethod, formatter, value);
+            return Expression.Call(SerializationHelper.WriteBytesMethod, this.FormatterParameter, value);
         }
 
-        private Expression WriteByteExpr(ParameterExpression formatter, Expression value)
+        private Expression WriteByteExpr(Expression value)
         {
             Debug.Assert(value.Type == typeof(byte));
-            return Expression.Call(SerializationHelper.WriteByteMethod, formatter, value);
+            return Expression.Call(SerializationHelper.WriteByteMethod, this.FormatterParameter, value);
         }
 
-        private Expression WriteCommaExpr(ParameterExpression formatter)
+        private Expression WriteCommaExpr()
         {
-            return this.WriteByteExpr(formatter, Expression.Constant((byte)','));
+            return this.WriteByteExpr(Expression.Constant((byte)','));
         }
 
-        private Expression WriteNull(ParameterExpression formatter)
+        private Expression WriteNull()
         {
-            return this.WriteBytesExpr(formatter, SerializationHelper.nullUtf8Expr);
+            return this.WriteBytesExpr(SerializationHelper.nullUtf8Expr);
         }
 
         private static bool IsIntegerType(Type type)
@@ -67,77 +75,94 @@ namespace JChopper
                 || type == typeof(uint) || type == typeof(int) || type == typeof(ulong) || type == typeof(long);
         }
 
-        private Expression CreateCommonSerializer(Expression target, ParameterExpression formatter)
+        private Expression CreateCommonSerializer(Expression target)
         {
-            //TODO: Support Utf8String
-            //TODO: CustomSerializer
             var type = target.Type;
             if (IsIntegerType(type))
-                return this.SerializeInteger(target, formatter);
+                return this.SerializeInteger(target);
             if (type == typeof(bool))
-                return this.SerializeBoolean(target, formatter);
+                return this.SerializeBoolean(target);
             if (type == typeof(float))
-                return this.SerializeFloat(target, formatter);
+                return this.SerializeFloat(target);
             if (type == typeof(double))
-                return this.SerializeDouble(target, formatter);
+                return this.SerializeDouble(target);
             if (type == typeof(decimal))
-                return this.SerializeDecimal(target, formatter);
+                return this.SerializeDecimal(target);
             if (type == typeof(char))
-                return this.SerializeChar(target, formatter);
+                return this.SerializeChar(target);
             if (type == typeof(string))
-                return this.SerializeString(target, formatter);
+                return this.SerializeString(target);
+            if (type == typeof(Utf8String))
+                return this.SerializeUtf8String(target);
             if (Nullable.GetUnderlyingType(type) != null)
-                return this.SerializeNullable(target, formatter);
+                return this.SerializeNullable(target);
             if (type.IsArray)
-                return this.SerializeArray(target, formatter);
+                return this.SerializeArray(target);
             if (!type.GetTypeInfo().IsDefined(typeof(AsJsonObjectAttribute))
                 && typeof(IEnumerable).GetTypeInfo().IsAssignableFrom(type.GetTypeInfo()))
-                return this.SerializeEnumerable(target, formatter);
+                return this.SerializeEnumerable(target);
             return null;
         }
 
-        protected virtual Expression CreateSerializer(Expression target, ParameterExpression formatter)
+        protected virtual Expression CreateSerializerExpression(Expression target)
         {
             Debug.Assert(target.Type == typeof(T));
             return Expression.Block(
                 Expression.IfThen(
                     Expression.Not(
                         Expression.Property(
-                            Expression.Property(formatter, typeof(IFormatter).GetRuntimeProperty(nameof(IFormatter.FormattingData))),//TODO: cache
+                            Expression.Property(this.FormatterParameter, SerializationHelper.FormattingDataProperty),
                             SerializationHelper.IsUtf8Property
                         )
                     ),
                     SerializationHelper.ThrowNotUtf8ExceptionExpr
                 ),
-                this.CreateCommonSerializer(target, formatter) ?? this.SerializeObject(target, formatter)
+                this.CreateCommonSerializer(target) ?? this.SerializeObject(target)
             );
         }
 
-        protected virtual Expression SerializeValue(Expression target, ParameterExpression formatter)
+        protected virtual Expression SerializeValue(Expression target)
         {
-            return this.CreateCommonSerializer(target, formatter) ??
-                this.SerializeOtherObject(target, formatter);
+            return this.CreateCommonSerializer(target) ?? this.SerializeOtherObject(target);
         }
 
-        protected virtual Expression SerializeOtherObject(Expression target, ParameterExpression formatter)
+        protected virtual Expression SerializeOtherObject(Expression target)
         {
             return Expression.Call(
                 this.parentExpr,
                 SerializationHelper.SerializeMethodDefinition.MakeGenericMethod(target.Type),
                 target,
-                formatter);
+                this.FormatterParameter);
         }
 
-        protected virtual Expression SerializeObject(Expression target, ParameterExpression formatter)
+        protected virtual Expression SerializeObject(Expression target)
         {
             Debug.Assert(target.Type == typeof(T));
 
-            var s = SerializationHelper.CreateMemberSerializers(target, formatter);
+            var s = SerializationHelper.CreateMemberSerializers(target, this.FormatterParameter);
             var body = s.Length == 0
-                ? this.WriteBytesExpr(formatter, SerializationHelper.emptyObjectUtf8Expr)
+                ? this.WriteBytesExpr(SerializationHelper.emptyObjectUtf8Expr)
                 : Expression.Block(
-                    s.SelectMany(x => new[] { x.WriteNameExpr, this.SerializeValue(x.GetValueExpr, formatter) })
-                      .Concat(new[] { this.WriteByteExpr(formatter, Expression.Constant((byte)'}')) }));
+                    s.SelectMany(x =>
+                    {
+                        Expression serializeExpr;
+                        if (x.CustomSerializer == null)
+                        {
+                            serializeExpr = this.SerializeValue(x.GetValueExpr);
+                        }
+                        else
+                        {
+                            ConstantExpression cs;
+                            if (!this.customSerializers.TryGetValue(x.CustomSerializer, out cs))
+                            {
+                                cs = Expression.Constant(Activator.CreateInstance(x.CustomSerializer));
+                                this.customSerializers.Add(x.CustomSerializer, cs);
+                            }
+                            serializeExpr = Expression.Call(cs, "Serialize", null, x.GetValueExpr, this.FormatterParameter);
+                        }
+                        return new[] { x.WriteNameExpr, serializeExpr };
+                    })
+                    .Concat(new[] { this.WriteByteExpr(Expression.Constant((byte)'}')) }));
 
             var local = Expression.Variable(typeof(T), "object");
 
@@ -146,13 +171,13 @@ namespace JChopper
                 Expression.Assign(local, target),
                 Expression.IfThenElse(
                     Expression.Equal(local, Expression.Constant(null)),
-                    this.WriteNull(formatter),
+                    this.WriteNull(),
                     body
                 )
             );
         }
 
-        protected virtual Expression SerializeArray(Expression target, ParameterExpression formatter)
+        protected virtual Expression SerializeArray(Expression target)
         {
             Debug.Assert(target.Type.IsArray);
 
@@ -166,24 +191,24 @@ namespace JChopper
                 Expression.Assign(array, target),
                 Expression.IfThenElse(
                     Expression.Equal(array, Expression.Constant(null)),
-                    this.WriteNull(formatter),
+                    this.WriteNull(),
                     Expression.Block(
                         new[] { len },
-                        this.WriteByteExpr(formatter, Expression.Constant((byte)'[')),
+                        this.WriteByteExpr(Expression.Constant((byte)'[')),
                         Expression.Assign(len, Expression.ArrayLength(array)),
                         Expression.IfThen(
                             Expression.GreaterThan(len, Expression.Constant(0)),
                             Expression.Block(
                                 new[] { i },
-                                this.SerializeValue(Expression.ArrayIndex(array, Expression.Constant(0)), formatter),
+                                this.SerializeValue(Expression.ArrayIndex(array, Expression.Constant(0))),
                                 Expression.Assign(i, Expression.Constant(1)),
                                 Expression.Loop(
                                     Expression.IfThenElse(
                                         Expression.LessThan(i, len),
                                         Expression.Block(
-                                            this.WriteCommaExpr(formatter),
+                                            this.WriteCommaExpr(),
                                             this.SerializeValue(Expression.ArrayIndex(
-                                                array, Expression.PostIncrementAssign(i)), formatter)
+                                                array, Expression.PostIncrementAssign(i)))
                                         ),
                                         Expression.Break(loopBreak)
                                     ),
@@ -193,11 +218,11 @@ namespace JChopper
                         )
                     )
                 ),
-                this.WriteByteExpr(formatter, Expression.Constant((byte)']'))
+                this.WriteByteExpr(Expression.Constant((byte)']'))
             );
         }
 
-        protected virtual Expression SerializeEnumerable(Expression target, ParameterExpression formatter)
+        protected virtual Expression SerializeEnumerable(Expression target)
         {
             var getEnumerator = target.Type.GetRuntimeMethod(nameof(IEnumerable.GetEnumerator), new Type[0]);
             Debug.Assert(getEnumerator != null);
@@ -214,19 +239,18 @@ namespace JChopper
                 Expression.Property(
                     enumerator,
                     getEnumerator.ReturnType.GetRuntimeProperty("Current")
-                ),
-                formatter);
+                ));
 
             return Expression.Block(
                 new[] { enumerable },
                 Expression.Assign(enumerable, target),
                 Expression.IfThenElse(
                     Expression.Equal(enumerable, Expression.Constant(null)),
-                    this.WriteNull(formatter),
+                    this.WriteNull(),
                     Expression.Block(
                         new[] { enumerator },
                         Expression.Assign(enumerator, Expression.Call(enumerable, getEnumerator)),
-                        this.WriteByteExpr(formatter, Expression.Constant((byte)'[')),
+                        this.WriteByteExpr(Expression.Constant((byte)'[')),
                         Expression.TryFinally(
                             Expression.IfThen(
                                 moveNext,
@@ -236,7 +260,7 @@ namespace JChopper
                                         Expression.IfThenElse(
                                             moveNext,
                                             Expression.Block(
-                                                this.WriteCommaExpr(formatter),
+                                                this.WriteCommaExpr(),
                                                 writeCurrent
                                             ),
                                             Expression.Break(loopBreak)
@@ -254,27 +278,26 @@ namespace JChopper
                                 )
                             )
                         ),
-                        this.WriteByteExpr(formatter, Expression.Constant((byte)']'))
+                        this.WriteByteExpr(Expression.Constant((byte)']'))
                     )
                 )
             );
         }
 
-        protected virtual Expression SerializeInteger(Expression target, ParameterExpression formatter)
+        protected virtual Expression SerializeInteger(Expression target)
         {
             Debug.Assert(IsIntegerType(target.Type));
             var type = target.Type;
             var appendMethod = typeof(IFormatterExtensions).GetRuntimeMethods()
                 .First(x => x.Name == nameof(IFormatterExtensions.Append) && x.GetParameters()[1].ParameterType == type)
-                .MakeGenericMethod(formatter.Type);
-            return Expression.Call(appendMethod, formatter, target, SerializationHelper.IntegerFormatExpr);
+                .MakeGenericMethod(this.FormatterParameter.Type);
+            return Expression.Call(appendMethod, this.FormatterParameter, target, SerializationHelper.IntegerFormatExpr);
         }
 
-        protected virtual Expression SerializeBoolean(Expression target, ParameterExpression formatter)
+        protected virtual Expression SerializeBoolean(Expression target)
         {
             Debug.Assert(target.Type == typeof(bool));
             return this.WriteBytesExpr(
-                formatter,
                 Expression.Condition(
                     target,
                     SerializationHelper.trueUtf8Expr,
@@ -283,10 +306,9 @@ namespace JChopper
             );
         }
 
-        private Expression FormatG(Expression target, ParameterExpression formatter, MethodInfo toString)
+        private Expression FormatG(Expression target, MethodInfo toString)
         {
             return this.AppendStringExpr(
-                formatter,
                 Expression.Call(
                     target,
                     toString,
@@ -296,44 +318,43 @@ namespace JChopper
             );
         }
 
-        protected virtual Expression SerializeFloat(Expression target, ParameterExpression formatter)
+        protected virtual Expression SerializeFloat(Expression target)
         {
             Debug.Assert(target.Type == typeof(float));
-            return this.FormatG(target, formatter, SerializationHelper.FloatToStringMethod);
+            return this.FormatG(target, SerializationHelper.FloatToStringMethod);
         }
 
-        protected virtual Expression SerializeDouble(Expression target, ParameterExpression formatter)
+        protected virtual Expression SerializeDouble(Expression target)
         {
             Debug.Assert(target.Type == typeof(double));
-            return this.FormatG(target, formatter, SerializationHelper.DoubleToStringMethod);
+            return this.FormatG(target, SerializationHelper.DoubleToStringMethod);
         }
 
-        protected virtual Expression SerializeDecimal(Expression target, ParameterExpression formatter)
+        protected virtual Expression SerializeDecimal(Expression target)
         {
             Debug.Assert(target.Type == typeof(decimal));
-            return this.FormatG(target, formatter, SerializationHelper.DecimalToStringMethod);
+            return this.FormatG(target, SerializationHelper.DecimalToStringMethod);
         }
 
-        protected virtual Expression SerializeChar(Expression target, ParameterExpression formatter)
+        protected virtual Expression SerializeChar(Expression target)
         {
             Debug.Assert(target.Type == typeof(char));
-            return this.SerializeString(Expression.Call(SerializationHelper.CharToStringStaticMethod, target), formatter);
+            return this.SerializeString(Expression.Call(SerializationHelper.CharToStringStaticMethod, target));
         }
 
-        protected virtual Expression SerializeString(Expression target, ParameterExpression formatter)
+        protected virtual Expression SerializeString(Expression target)
         {
             Debug.Assert(target.Type == typeof(string));
-
-            var local = Expression.Variable(typeof(string));
-
-            return Expression.Block(
-                new[] { local },
-                Expression.Assign(local, target),
-                Expression.Call(null, SerializationHelper.WriteStringMethod, formatter, local)
-            );
+            return Expression.Call(null, SerializationHelper.WriteStringMethod, this.FormatterParameter, target);
         }
 
-        protected virtual Expression SerializeNullable(Expression target, ParameterExpression formatter)
+        protected virtual Expression SerializeUtf8String(Expression target)
+        {
+            Debug.Assert(target.Type == typeof(Utf8String));
+            return Expression.Call(null, SerializationHelper.WriteUtf8StringMethod, this.FormatterParameter, target);
+        }
+
+        protected virtual Expression SerializeNullable(Expression target)
         {
             Debug.Assert(target.Type.GetGenericTypeDefinition() == typeof(Nullable<>));
 
@@ -344,8 +365,8 @@ namespace JChopper
                 Expression.Assign(local, target),
                 Expression.IfThenElse(
                     Expression.Property(local, "HasValue"),
-                    this.SerializeValue(Expression.Property(local, "Value"), formatter),
-                    this.WriteNull(formatter)
+                    this.SerializeValue(Expression.Property(local, "Value")),
+                    this.WriteNull()
                 ));
         }
     }

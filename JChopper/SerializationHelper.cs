@@ -9,6 +9,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.Serialization;
 using System.Text;
 using System.Text.Formatting;
+using System.Text.Utf8;
 
 namespace JChopper
 {
@@ -42,7 +43,7 @@ namespace JChopper
         internal static readonly MethodInfo AppendStringMethod = appendMethods.First(x => x.GetParameters()[1].ParameterType == typeof(string)).MakeGenericMethod(typeof(IFormatter));
         internal static readonly MethodInfo AppendCharMethod = appendMethods.First(x => x.GetParameters()[1].ParameterType == typeof(char)).MakeGenericMethod(typeof(IFormatter));
 
-        internal static readonly PropertyInfo IsUtf16Property = typeof(FormattingData).GetTypeInfo().DeclaredProperties.First(x => x.Name == "IsUtf16");
+        internal static readonly PropertyInfo FormattingDataProperty = typeof(IFormatter).GetRuntimeProperty(nameof(IFormatter.FormattingData));
         internal static readonly PropertyInfo IsUtf8Property = typeof(FormattingData).GetTypeInfo().DeclaredProperties.First(x => x.Name == "IsUtf8");
 
         internal static readonly MethodInfo MoveNextMethod = typeof(IEnumerator).GetRuntimeMethod(nameof(IEnumerator.MoveNext), new Type[0]);
@@ -218,6 +219,137 @@ namespace JChopper
         }
 
         internal static readonly MethodInfo WriteStringMethod = GetMethod(nameof(WriteString));
+
+        public static void WriteUtf8String(IFormatter formatter, Utf8String value)
+        {
+            var buffer = RequireBuffer(formatter, 2);
+
+            buffer[0] = (byte)'"';
+            buffer = buffer.Slice(1);
+            var bytesWritten = 1;
+
+            var start = 0;
+            var i = 0;
+            for (; i < value.Length; i++)
+            {
+                var b = value[i].Value;
+                int flag;
+                byte x;
+                switch (b)
+                {
+                    case 0x22:
+                    case 0x5C:
+                        flag = 2;
+                        x = b;
+                        break;
+                    case 0x08:
+                        flag = 2;
+                        x = (byte)'b';
+                        break;
+                    case 0x0C:
+                        flag = 2;
+                        x = (byte)'f';
+                        break;
+                    case 0x0A:
+                        flag = 2;
+                        x = (byte)'n';
+                        break;
+                    case 0x0D:
+                        flag = 2;
+                        x = (byte)'r';
+                        break;
+                    case 0x09:
+                        flag = 2;
+                        x = (byte)'t';
+                        break;
+                    default:
+                        if (b <= 0x09)
+                        {
+                            flag = 0;
+                            x = (byte)(b + 0x30);
+                        }
+                        else if (b >= 0x0A && b <= 0x0F)
+                        {
+                            flag = 0;
+                            x = (byte)(b + 0x37);
+                        }
+                        else if (b >= 0x10 && b <= 0x19)
+                        {
+                            flag = 1;
+                            x = (byte)(b + 0x20);
+                        }
+                        else if (b >= 0x1A && b <= 0x1F)
+                        {
+                            flag = 1;
+                            x = (byte)(b + 0x27);
+                        }
+                        else
+                        {
+                            continue;
+                        }
+                        break;
+                }
+
+                if (start < i)
+                {
+                    var slice = value.Substring(start, i - start);
+                    RequireBuffer(ref buffer, ref bytesWritten, formatter, slice.Length);
+                    slice.CopyTo(buffer);
+                    bytesWritten += slice.Length;
+                    buffer = buffer.Slice(slice.Length);
+                }
+
+                switch (flag)
+                {
+                    case 0:
+                        // \u000x
+                        RequireBuffer(ref buffer, ref bytesWritten, formatter, 6);
+                        buffer.Set(u000Utf8);
+                        buffer[5] = x;
+                        bytesWritten += 6;
+                        buffer = buffer.Slice(6);
+                        break;
+                    case 1:
+                        // \u001x
+                        RequireBuffer(ref buffer, ref bytesWritten, formatter, 6);
+                        buffer.Set(u001Utf8);
+                        buffer[5] = x;
+                        bytesWritten += 6;
+                        buffer = buffer.Slice(6);
+                        break;
+                    case 2:
+                        // \x
+                        RequireBuffer(ref buffer, ref bytesWritten, formatter, 2);
+                        buffer[0] = (byte)'\\';
+                        buffer[1] = x;
+                        bytesWritten += 2;
+                        buffer = buffer.Slice(2);
+                        break;
+                    default:
+                        throw new Exception("unreachable");
+                }
+
+                start = i + 1;
+            }
+
+            if (start < i)
+            {
+                var slice = value.Substring(start, i - start);
+                RequireBuffer(ref buffer, ref bytesWritten, formatter, slice.Length + 1);
+                slice.CopyTo(buffer);
+                bytesWritten += slice.Length;
+                buffer = buffer.Slice(slice.Length);
+            }
+            else
+            {
+                RequireBuffer(ref buffer, ref bytesWritten, formatter, 1);
+            }
+
+            buffer[0] = (byte)'"';
+            formatter.CommitBytes(bytesWritten + 1);
+        }
+
+        internal static readonly MethodInfo WriteUtf8StringMethod = GetMethod(nameof(WriteUtf8String));
 
         private static readonly byte[] nullUtf8 = Encoding.UTF8.GetBytes("null");
         private static readonly byte[] trueUtf8 = Encoding.UTF8.GetBytes("true");
