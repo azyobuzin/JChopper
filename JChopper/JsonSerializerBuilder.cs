@@ -5,8 +5,8 @@ using System.Diagnostics;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
-using System.Text.Formatting;
 using System.Text.Utf8;
+using JChopper.Writers;
 
 namespace JChopper
 {
@@ -15,53 +15,53 @@ namespace JChopper
         public JsonSerializerBuilder(IJsonSerializer parent)
         {
             this.Parent = parent;
-            this.parentExpr = Expression.Constant(parent);
+            this._parentExpr = Expression.Constant(parent);
         }
 
         public IJsonSerializer Parent { get; }
-        private readonly Expression parentExpr;
+        private readonly Expression _parentExpr;
 
-        protected ParameterExpression FormatterParameter { get; } = Expression.Parameter(typeof(IFormatter), "formatter");
+        protected ParameterExpression WriterParameter { get; } = Expression.Parameter(typeof(IWriter), "writer");
 
         private readonly Dictionary<Type, ConstantExpression> customSerializers = new Dictionary<Type, ConstantExpression>();
 
-        public virtual Action<T, IFormatter> CreateSerializer()
+        public virtual SerializationAction<T> CreateSerializer()
         {
             var prmObj = Expression.Parameter(typeof(T), "obj");
-            return Expression.Lambda<Action<T, IFormatter>>(
+            return Expression.Lambda<SerializationAction<T>>(
                 CreateSerializerExpression(prmObj),
                 prmObj,
-                this.FormatterParameter
+                this.WriterParameter
             ).Compile();
         }
 
         private Expression AppendStringExpr(Expression value)
         {
             Debug.Assert(value.Type == typeof(string));
-            return Expression.Call(SerializationHelper.AppendStringMethod, this.FormatterParameter, value, SerializationHelper.DefaultFormatExpr);
+            return Expression.Call(SerializationHelper.AppendStringMethod, this.WriterParameter, value);
         }
 
         private Expression AppendCharExpr(Expression value)
         {
             Debug.Assert(value.Type == typeof(char));
-            return Expression.Call(SerializationHelper.AppendCharMethod, this.FormatterParameter, value, SerializationHelper.DefaultFormatExpr);
+            return Expression.Call(SerializationHelper.AppendCharMethod, this.WriterParameter, value);
         }
 
         private Expression WriteBytesExpr(Expression value)
         {
             Debug.Assert(value.Type == typeof(byte[]));
-            return Expression.Call(SerializationHelper.WriteBytesMethod, this.FormatterParameter, value);
+            return Expression.Call(this.WriterParameter, SerializationHelper.WriteBytesMethod, value);
         }
 
         private Expression WriteByteExpr(Expression value)
         {
             Debug.Assert(value.Type == typeof(byte));
-            return Expression.Call(SerializationHelper.WriteByteMethod, this.FormatterParameter, value);
+            return Expression.Call(this.WriterParameter, SerializationHelper.WriteByteMethod, value);
         }
 
         private Expression WriteCommaExpr()
         {
-            return this.WriteByteExpr(Expression.Constant((byte)','));
+            return this.WriteByteExpr(SerializationHelper.CommaConst);
         }
 
         private Expression WriteNull()
@@ -69,17 +69,23 @@ namespace JChopper
             return this.WriteBytesExpr(SerializationHelper.nullUtf8Expr);
         }
 
-        private static bool IsIntegerType(Type type)
+        private static bool IsSignedIntegerType(Type type)
         {
-            return type == typeof(byte) || type == typeof(sbyte) || type == typeof(ushort) || type == typeof(short)
-                || type == typeof(uint) || type == typeof(int) || type == typeof(ulong) || type == typeof(long);
+            return type == typeof(sbyte) || type == typeof(short) || type == typeof(int) || type == typeof(long);
+        }
+
+        private static bool IsUnsignedIntegerType(Type type)
+        {
+            return type == typeof(byte) || type == typeof(ushort) || type == typeof(uint) || type == typeof(ulong);
         }
 
         private Expression CreateCommonSerializer(Expression target)
         {
             var type = target.Type;
-            if (IsIntegerType(type))
-                return this.SerializeInteger(target);
+            if (IsSignedIntegerType(type))
+                return this.SerializeSignedInteger(target);
+            if (IsUnsignedIntegerType(type))
+                return this.SerializeUnsignedInteger(target);
             if (type == typeof(bool))
                 return this.SerializeBoolean(target);
             if (type == typeof(float))
@@ -107,18 +113,7 @@ namespace JChopper
         protected virtual Expression CreateSerializerExpression(Expression target)
         {
             Debug.Assert(target.Type == typeof(T));
-            return Expression.Block(
-                Expression.IfThen(
-                    Expression.Not(
-                        Expression.Property(
-                            Expression.Property(this.FormatterParameter, SerializationHelper.FormattingDataProperty),
-                            SerializationHelper.IsUtf8Property
-                        )
-                    ),
-                    SerializationHelper.ThrowNotUtf8ExceptionExpr
-                ),
-                this.CreateCommonSerializer(target) ?? this.SerializeObject(target)
-            );
+            return this.CreateCommonSerializer(target) ?? this.SerializeObject(target);
         }
 
         protected virtual Expression SerializeValue(Expression target)
@@ -129,17 +124,17 @@ namespace JChopper
         protected virtual Expression SerializeOtherObject(Expression target)
         {
             return Expression.Call(
-                this.parentExpr,
+                this._parentExpr,
                 SerializationHelper.SerializeMethodDefinition.MakeGenericMethod(target.Type),
                 target,
-                this.FormatterParameter);
+                this.WriterParameter);
         }
 
         protected virtual Expression SerializeObject(Expression target)
         {
             Debug.Assert(target.Type == typeof(T));
 
-            var s = SerializationHelper.CreateMemberSerializers(target, this.FormatterParameter);
+            var s = SerializationHelper.CreateMemberSerializers(target, this.WriterParameter);
             var body = s.Length == 0
                 ? this.WriteBytesExpr(SerializationHelper.emptyObjectUtf8Expr)
                 : Expression.Block(
@@ -158,11 +153,11 @@ namespace JChopper
                                 cs = Expression.Constant(Activator.CreateInstance(x.CustomSerializer));
                                 this.customSerializers.Add(x.CustomSerializer, cs);
                             }
-                            serializeExpr = Expression.Call(cs, "Serialize", null, x.GetValueExpr, this.FormatterParameter);
+                            serializeExpr = Expression.Call(cs, "Serialize", null, x.GetValueExpr, this.WriterParameter);
                         }
                         return new[] { x.WriteNameExpr, serializeExpr };
                     })
-                    .Concat(new[] { this.WriteByteExpr(Expression.Constant((byte)'}')) }));
+                    .Concat(new[] { this.WriteByteExpr(SerializationHelper.EndObjectConst) }));
 
             var local = Expression.Variable(typeof(T), "object");
 
@@ -194,7 +189,7 @@ namespace JChopper
                     this.WriteNull(),
                     Expression.Block(
                         new[] { len },
-                        this.WriteByteExpr(Expression.Constant((byte)'[')),
+                        this.WriteByteExpr(SerializationHelper.StartArrayConst),
                         Expression.Assign(len, Expression.ArrayLength(array)),
                         Expression.IfThen(
                             Expression.GreaterThan(len, Expression.Constant(0)),
@@ -218,7 +213,7 @@ namespace JChopper
                         )
                     )
                 ),
-                this.WriteByteExpr(Expression.Constant((byte)']'))
+                this.WriteByteExpr(SerializationHelper.EndArrayConst)
             );
         }
 
@@ -250,7 +245,7 @@ namespace JChopper
                     Expression.Block(
                         new[] { enumerator },
                         Expression.Assign(enumerator, Expression.Call(enumerable, getEnumerator)),
-                        this.WriteByteExpr(Expression.Constant((byte)'[')),
+                        this.WriteByteExpr(SerializationHelper.StartArrayConst),
                         Expression.TryFinally(
                             Expression.IfThen(
                                 moveNext,
@@ -278,20 +273,22 @@ namespace JChopper
                                 )
                             )
                         ),
-                        this.WriteByteExpr(Expression.Constant((byte)']'))
+                        this.WriteByteExpr(SerializationHelper.EndArrayConst)
                     )
                 )
             );
         }
 
-        protected virtual Expression SerializeInteger(Expression target)
+        protected virtual Expression SerializeSignedInteger(Expression target)
         {
-            Debug.Assert(IsIntegerType(target.Type));
-            var type = target.Type;
-            var appendMethod = typeof(IFormatterExtensions).GetRuntimeMethods()
-                .First(x => x.Name == nameof(IFormatterExtensions.Append) && x.GetParameters()[1].ParameterType == type)
-                .MakeGenericMethod(this.FormatterParameter.Type);
-            return Expression.Call(appendMethod, this.FormatterParameter, target, SerializationHelper.IntegerFormatExpr);
+            Debug.Assert(IsSignedIntegerType(target.Type));
+            return Expression.Call(SerializationHelper.AppendInt64Method, this.WriterParameter, Expression.Convert(target, typeof(long)));
+        }
+
+        protected virtual Expression SerializeUnsignedInteger(Expression target)
+        {
+            Debug.Assert(IsUnsignedIntegerType(target.Type));
+            return Expression.Call(SerializationHelper.AppendUInt64Method, this.WriterParameter, Expression.Convert(target, typeof(ulong)));
         }
 
         protected virtual Expression SerializeBoolean(Expression target)
@@ -345,13 +342,13 @@ namespace JChopper
         protected virtual Expression SerializeString(Expression target)
         {
             Debug.Assert(target.Type == typeof(string));
-            return Expression.Call(null, SerializationHelper.WriteStringMethod, this.FormatterParameter, target);
+            return Expression.Call(null, SerializationHelper.WriteStringLiteralMethod, this.WriterParameter, target);
         }
 
         protected virtual Expression SerializeUtf8String(Expression target)
         {
             Debug.Assert(target.Type == typeof(Utf8String));
-            return Expression.Call(null, SerializationHelper.WriteUtf8StringMethod, this.FormatterParameter, target);
+            return Expression.Call(null, SerializationHelper.WriteStringLiteralUtf8Method, this.WriterParameter, target);
         }
 
         protected virtual Expression SerializeNullable(Expression target)

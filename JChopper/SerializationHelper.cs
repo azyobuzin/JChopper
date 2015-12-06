@@ -1,19 +1,19 @@
 ﻿using System;
-using System.Buffers;
 using System.Collections;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
-using System.Runtime.CompilerServices;
 using System.Runtime.Serialization;
 using System.Text;
-using System.Text.Formatting;
+using System.Text.Utf16;
 using System.Text.Utf8;
+using JChopper.Writers;
 
 namespace JChopper
 {
-    static class SerializationHelper
+    public static class SerializationHelper
     {
         private static MemberExpression MemberExpr<T>(Expression<Func<T>> expr)
         {
@@ -25,11 +25,10 @@ namespace JChopper
             return typeof(SerializationHelper).GetTypeInfo().GetDeclaredMethod(name);
         }
 
-        private static readonly Format.Parsed DefaultFormat = default(Format.Parsed);
-        internal static readonly MemberExpression DefaultFormatExpr = MemberExpr(() => DefaultFormat);
-
-        private static readonly Format.Parsed IntegerFormat = Format.Parse('D');
-        internal static readonly MemberExpression IntegerFormatExpr = MemberExpr(() => IntegerFormat);
+        internal static readonly ConstantExpression CommaConst = Expression.Constant((byte)',');
+        internal static readonly ConstantExpression StartArrayConst = Expression.Constant((byte)'[');
+        internal static readonly ConstantExpression EndArrayConst = Expression.Constant((byte)']');
+        internal static readonly ConstantExpression EndObjectConst = Expression.Constant((byte)'}');
 
         internal static readonly MethodInfo FloatToStringMethod = typeof(float).GetRuntimeMethod(nameof(float.ToString), new[] { typeof(string), typeof(IFormatProvider) });
         internal static readonly MethodInfo DoubleToStringMethod = typeof(double).GetRuntimeMethod(nameof(double.ToString), new[] { typeof(string), typeof(IFormatProvider) });
@@ -38,64 +37,109 @@ namespace JChopper
 
         internal static readonly MemberExpression InvariantCultureExpr = MemberExpr(() => CultureInfo.InvariantCulture);
 
-        private static readonly MethodInfo[] appendMethods = typeof(IFormatterExtensions).GetTypeInfo().DeclaredMethods
-           .Where(x => x.Name == nameof(IFormatterExtensions.Append)).ToArray();
-        internal static readonly MethodInfo AppendStringMethod = appendMethods.First(x => x.GetParameters()[1].ParameterType == typeof(string)).MakeGenericMethod(typeof(IFormatter));
-        internal static readonly MethodInfo AppendCharMethod = appendMethods.First(x => x.GetParameters()[1].ParameterType == typeof(char)).MakeGenericMethod(typeof(IFormatter));
-
-        internal static readonly PropertyInfo FormattingDataProperty = typeof(IFormatter).GetRuntimeProperty(nameof(IFormatter.FormattingData));
-        internal static readonly PropertyInfo IsUtf8Property = typeof(FormattingData).GetTypeInfo().DeclaredProperties.First(x => x.Name == "IsUtf8");
+        internal static readonly MethodInfo WriteBytesMethod = typeof(IWriter).GetRuntimeMethod(nameof(IWriter.Write), new[] { typeof(byte[]) });
+        internal static readonly MethodInfo WriteByteMethod = typeof(IWriter).GetRuntimeMethod(nameof(IWriter.Write), new[] { typeof(byte) });
 
         internal static readonly MethodInfo MoveNextMethod = typeof(IEnumerator).GetRuntimeMethod(nameof(IEnumerator.MoveNext), new Type[0]);
         internal static readonly MethodInfo DisposeMethod = typeof(IDisposable).GetRuntimeMethod(nameof(IDisposable.Dispose), new Type[0]);
 
         internal static readonly MethodInfo SerializeMethodDefinition = typeof(IJsonSerializer).GetTypeInfo().GetDeclaredMethod("Serialize");
 
-        internal static readonly Expression ThrowNotUtf8ExceptionExpr = Expression.Throw(Expression.New(
-            typeof(ArgumentException).GetTypeInfo().DeclaredConstructors.First(x => x.GetParameters().Length == 1),
-            Expression.Constant("The specified formatter is not for UTF-8.")));
+        private const int MaxUtf8CodePointBytes = 4;
+
+        public static void AppendChar(this IWriter writer, char value)
+        {
+            int encodedBytes;
+            var success = Utf8Encoder.TryEncodeCodePoint(
+                new UnicodeCodePoint(value),
+                writer.GetFreeBuffer(MaxUtf8CodePointBytes).ToSpan(),
+                out encodedBytes);
+            Debug.Assert(success);
+            writer.CommitBytes(encodedBytes);
+        }
+
+        internal static readonly MethodInfo AppendCharMethod = GetMethod(nameof(AppendChar));
+
+        private static void AppendStringInternal(this IWriter writer, string value, int startIndex, int endIndex)
+        {
+            for (var i = startIndex; i <= endIndex;)
+            {
+                UnicodeCodePoint codePoint;
+                int encodedChars;
+                var success = Utf16LittleEndianEncoder.TryDecodeCodePointFromString(value, i, out codePoint, out encodedChars);
+                if (!success)
+                    throw new ArgumentException();
+                i += encodedChars;
+
+                int encodedBytes;
+                success = Utf8Encoder.TryEncodeCodePoint(
+                    codePoint,
+                    writer.GetFreeBuffer(MaxUtf8CodePointBytes).ToSpan(),
+                    out encodedBytes);
+                Debug.Assert(success);
+                writer.CommitBytes(encodedBytes);
+            }
+        }
+
+        public static void AppendString(this IWriter writer, string value)
+        {
+            var enumerator = new Utf16LittleEndianCodePointEnumerator(value); // no need to dispose this
+            while (enumerator.MoveNext())
+            {
+                int encodedBytes;
+                var success = Utf8Encoder.TryEncodeCodePoint(
+                    enumerator.Current,
+                    writer.GetFreeBuffer(MaxUtf8CodePointBytes).ToSpan(),
+                    out encodedBytes);
+                Debug.Assert(success);
+                writer.CommitBytes(encodedBytes);
+            }
+        }
+
+        internal static readonly MethodInfo AppendStringMethod = GetMethod(nameof(AppendString));
+
+        public static void AppendUInt64(this IWriter writer, ulong value)
+        {
+            var tmp = value;
+            var count = 1;
+            while (tmp >= 10)
+            {
+                count++;
+                tmp /= 10;
+            }
+
+            var buffer = writer.GetFreeBuffer(count);
+            var tmp2 = buffer.Offset + count;
+            for (var i = buffer.Offset; i < tmp2; i++)
+            {
+                buffer.Array[i] = (byte)(value % 10 + '0');
+                value /= 10;
+            }
+
+            writer.CommitBytes(count);
+        }
+
+        internal static readonly MethodInfo AppendUInt64Method = GetMethod(nameof(AppendUInt64));
+
+        public static void AppendInt64(this IWriter writer, long value)
+        {
+            if (value < 0)
+            {
+                writer.Write((byte)'-');
+                value = -value;
+            }
+
+            writer.AppendUInt64(unchecked((ulong)value));
+        }
+
+        internal static readonly MethodInfo AppendInt64Method = GetMethod(nameof(AppendInt64));
 
         private static readonly byte[] u000Utf8 = Encoding.UTF8.GetBytes("\\u000");
         private static readonly byte[] u001Utf8 = Encoding.UTF8.GetBytes("\\u001");
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static void RequireBuffer(ref Span<byte> buffer, ref int bytesWritten, IFormatter formatter, int requiredBytes)
+        public static void WriteStringLiteral(this IWriter writer, string value)
         {
-            if (buffer.Length >= requiredBytes)
-                return;
-
-            // Commit
-            if (bytesWritten > 0)
-            {
-                formatter.CommitBytes(bytesWritten);
-                bytesWritten = 0;
-                buffer = formatter.FreeBuffer;
-            }
-
-            // Resize
-            while (buffer.Length < requiredBytes)
-            {
-                formatter.ResizeBuffer();
-                buffer = formatter.FreeBuffer;
-            }
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static Span<byte> RequireBuffer(IFormatter formatter, int requiredBytes)
-        {
-            Span<byte> buffer;
-            while ((buffer = formatter.FreeBuffer).Length < requiredBytes)
-                formatter.ResizeBuffer();
-            return buffer;
-        }
-
-        public static void WriteString(IFormatter formatter, string value)
-        {
-            var buffer = RequireBuffer(formatter, 2);
-
-            buffer[0] = (byte)'"';
-            buffer = buffer.Slice(1);
-            var bytesWritten = 1;
+            writer.Write((byte)'"');
 
             var start = 0;
             var i = 0;
@@ -161,38 +205,25 @@ namespace JChopper
 
                 if (start < i)
                 {
-                    var bytes = Encoding.UTF8.GetBytes(value.ToCharArray(start, i - start));
-                    RequireBuffer(ref buffer, ref bytesWritten, formatter, bytes.Length);
-                    buffer.Set(bytes);
-                    bytesWritten += bytes.Length;
-                    buffer = buffer.Slice(bytes.Length);
+                    writer.AppendStringInternal(value, start, i - 1);
                 }
 
                 switch (flag)
                 {
                     case 0:
                         // \u000x
-                        RequireBuffer(ref buffer, ref bytesWritten, formatter, 6);
-                        buffer.Set(u000Utf8);
-                        buffer[5] = x;
-                        bytesWritten += 6;
-                        buffer = buffer.Slice(6);
+                        writer.Write(u000Utf8);
+                        writer.Write(x);
                         break;
                     case 1:
                         // \u001x
-                        RequireBuffer(ref buffer, ref bytesWritten, formatter, 6);
-                        buffer.Set(u001Utf8);
-                        buffer[5] = x;
-                        bytesWritten += 6;
-                        buffer = buffer.Slice(6);
+                        writer.Write(u001Utf8);
+                        writer.Write(x);
                         break;
                     case 2:
                         // \x
-                        RequireBuffer(ref buffer, ref bytesWritten, formatter, 2);
-                        buffer[0] = (byte)'\\';
-                        buffer[1] = x;
-                        bytesWritten += 2;
-                        buffer = buffer.Slice(2);
+                        writer.Write((byte)'\\');
+                        writer.Write(x);
                         break;
                     default:
                         throw new Exception("unreachable");
@@ -203,30 +234,17 @@ namespace JChopper
 
             if (start < i)
             {
-                var bytes = Encoding.UTF8.GetBytes(value.ToCharArray(start, i - start));
-                RequireBuffer(ref buffer, ref bytesWritten, formatter, bytes.Length + 1);
-                buffer.Set(bytes);
-                bytesWritten += bytes.Length;
-                buffer = buffer.Slice(bytes.Length);
-            }
-            else
-            {
-                RequireBuffer(ref buffer, ref bytesWritten, formatter, 1);
+                writer.AppendStringInternal(value, start, i - 1);
             }
 
-            buffer[0] = (byte)'"';
-            formatter.CommitBytes(bytesWritten + 1);
+            writer.Write((byte)'"');
         }
 
-        internal static readonly MethodInfo WriteStringMethod = GetMethod(nameof(WriteString));
+        internal static readonly MethodInfo WriteStringLiteralMethod = GetMethod(nameof(WriteStringLiteral));
 
-        public static void WriteUtf8String(IFormatter formatter, Utf8String value)
+        public static void WriteStringLiteralUtf8(this IWriter writer, Utf8String value)
         {
-            var buffer = RequireBuffer(formatter, 2);
-
-            buffer[0] = (byte)'"';
-            buffer = buffer.Slice(1);
-            var bytesWritten = 1;
+            writer.Write((byte)'"');
 
             var start = 0;
             var i = 0;
@@ -293,37 +311,26 @@ namespace JChopper
                 if (start < i)
                 {
                     var slice = value.Substring(start, i - start);
-                    RequireBuffer(ref buffer, ref bytesWritten, formatter, slice.Length);
-                    slice.CopyTo(buffer);
-                    bytesWritten += slice.Length;
-                    buffer = buffer.Slice(slice.Length);
+                    slice.CopyTo(writer.GetFreeBuffer(slice.Length).ToSpan());
+                    writer.CommitBytes(slice.Length);
                 }
 
                 switch (flag)
                 {
                     case 0:
                         // \u000x
-                        RequireBuffer(ref buffer, ref bytesWritten, formatter, 6);
-                        buffer.Set(u000Utf8);
-                        buffer[5] = x;
-                        bytesWritten += 6;
-                        buffer = buffer.Slice(6);
+                        writer.Write(u000Utf8);
+                        writer.Write(x);
                         break;
                     case 1:
                         // \u001x
-                        RequireBuffer(ref buffer, ref bytesWritten, formatter, 6);
-                        buffer.Set(u001Utf8);
-                        buffer[5] = x;
-                        bytesWritten += 6;
-                        buffer = buffer.Slice(6);
+                        writer.Write(u001Utf8);
+                        writer.Write(x);
                         break;
                     case 2:
                         // \x
-                        RequireBuffer(ref buffer, ref bytesWritten, formatter, 2);
-                        buffer[0] = (byte)'\\';
-                        buffer[1] = x;
-                        bytesWritten += 2;
-                        buffer = buffer.Slice(2);
+                        writer.Write((byte)'\\');
+                        writer.Write(x);
                         break;
                     default:
                         throw new Exception("unreachable");
@@ -335,21 +342,14 @@ namespace JChopper
             if (start < i)
             {
                 var slice = value.Substring(start, i - start);
-                RequireBuffer(ref buffer, ref bytesWritten, formatter, slice.Length + 1);
-                slice.CopyTo(buffer);
-                bytesWritten += slice.Length;
-                buffer = buffer.Slice(slice.Length);
-            }
-            else
-            {
-                RequireBuffer(ref buffer, ref bytesWritten, formatter, 1);
+                slice.CopyTo(writer.GetFreeBuffer(slice.Length).ToSpan());
+                writer.CommitBytes(slice.Length);
             }
 
-            buffer[0] = (byte)'"';
-            formatter.CommitBytes(bytesWritten + 1);
+            writer.Write((byte)'"');
         }
 
-        internal static readonly MethodInfo WriteUtf8StringMethod = GetMethod(nameof(WriteUtf8String));
+        internal static readonly MethodInfo WriteStringLiteralUtf8Method = GetMethod(nameof(WriteStringLiteralUtf8));
 
         private static readonly byte[] nullUtf8 = Encoding.UTF8.GetBytes("null");
         private static readonly byte[] trueUtf8 = Encoding.UTF8.GetBytes("true");
@@ -361,25 +361,6 @@ namespace JChopper
         internal static readonly MemberExpression falseUtf8Expr = MemberExpr(() => falseUtf8);
         internal static readonly MemberExpression emptyObjectUtf8Expr = MemberExpr(() => emptyObjectUtf8);
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static void WriteBytes(IFormatter formatter, byte[] value)
-        {
-            RequireBuffer(formatter, value.Length).Set(value);
-            formatter.CommitBytes(value.Length);
-        }
-
-        internal static readonly MethodInfo WriteBytesMethod = GetMethod(nameof(WriteBytes));
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static void WriteByte(IFormatter formatter, byte value)
-        {
-            var buffer = RequireBuffer(formatter, 1);
-            buffer[0] = value;
-            formatter.CommitBytes(1);
-        }
-
-        internal static readonly MethodInfo WriteByteMethod = GetMethod(nameof(WriteByte));
-
         internal class MemberSerializer
         {
             public Expression WriteNameExpr;
@@ -387,12 +368,8 @@ namespace JChopper
             public Type CustomSerializer;
         }
 
-        internal static MemberSerializer[] CreateMemberSerializers(Expression obj, ParameterExpression formatter)
+        internal static MemberSerializer[] CreateMemberSerializers(Expression obj, ParameterExpression writer)
         {
-            // BufferFormatter for escaping property names.
-            // Create an instance of ManagedBufferPool since a BufferFormatter never returns it's buffer.
-            var bufFormatter = new BufferFormatter(30, FormattingData.InvariantUtf8, new ManagedBufferPool<byte>());
-
             return obj.Type.GetRuntimeProperties()
                 .Where(x => x.CanRead && !x.GetMethod.IsStatic && (x.GetMethod.IsPublic || x.IsDefined(typeof(DataMemberAttribute))) && x.GetIndexParameters().Length == 0)
                 .Select(x => Tuple.Create(x as MemberInfo, Expression.Property(obj, x)))
@@ -415,20 +392,24 @@ namespace JChopper
                 .ThenBy(x => x.Item2)
                 .Select((x, i) =>
                 {
-                    bufFormatter.Clear();
-                    WriteString(bufFormatter, x.Item2);
-
                     // nameBytes
                     // { '{' or ',', ... escaped string ..., ':' }
-                    var commitedByteCount = bufFormatter.CommitedByteCount;
-                    var nameBytes = new byte[commitedByteCount + 2];
-                    nameBytes[0] = i == 0 ? (byte)'{' : (byte)',';
-                    nameBytes[commitedByteCount + 1] = (byte)':';
-                    Buffer.BlockCopy(bufFormatter.Buffer, 0, nameBytes, 1, commitedByteCount);
+                    byte[] nameBytes;
+
+                    using (var memWriter = new MemoryWriter())
+                    {
+                        WriteStringLiteral(memWriter, x.Item2);
+
+                        var buffer = memWriter.GetBuffer();
+                        nameBytes = new byte[buffer.Count + 2];
+                        nameBytes[0] = i == 0 ? (byte)'{' : (byte)',';
+                        nameBytes[nameBytes.Length - 1] = (byte)':';
+                        Buffer.BlockCopy(buffer.Array, buffer.Offset, nameBytes, 1, buffer.Count);
+                    }
 
                     return new MemberSerializer
                     {
-                        WriteNameExpr = Expression.Call(WriteBytesMethod, formatter, Expression.Constant(nameBytes)),
+                        WriteNameExpr = Expression.Call(writer, WriteBytesMethod, Expression.Constant(nameBytes)),
                         GetValueExpr = x.Item3,
                         CustomSerializer = x.Item4
                     };

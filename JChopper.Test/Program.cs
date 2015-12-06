@@ -6,6 +6,7 @@ using System.Text.Formatting;
 using System.Text.Utf8;
 using System.Threading.Tasks;
 using JChopper;
+using JChopper.Writers;
 
 namespace JChopper.Test
 {
@@ -16,7 +17,8 @@ namespace JChopper.Test
             Console.WriteLine(JsonSerializer.Default.Serialize(new TestClass
             {
                 X = new Utf8String("這いよる混沌のようなホモ怖い。\r\n\0"),
-                Y = 2
+                Y = 2,
+                Z = "わかり手の手✋\r\n"
             }).ToString());
             Console.ReadLine();
         }
@@ -25,23 +27,7 @@ namespace JChopper.Test
     class TestClass
     {
         public Utf8String X { get; set; }
-
-        [CustomSerializer(typeof(StringifyConverter))]
         public int Y { get; set; }
-    }
-
-    class StringifyConverter : ICustomSerializer<int>
-    {
-        public void Serialize(int obj, IFormatter formatter)
-        {
-            formatter.Append('"');
-            formatter.Append(obj);
-            formatter.Append('"');
-        }
-
-        public int Deserialize(Utf8String json)
-        {
-            throw new NotImplementedException();
-        }
+        public string Z { get; set; }
     }
 }
